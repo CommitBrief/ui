@@ -54,14 +54,17 @@ build: wails3-check ## Build the desktop binary into bin/ (wails3 build)
 dev: wails3-check ## Run the app in development mode (wails3 dev)
 	wails3 dev -config ./build/config.yml
 
-test: frontend-build ## Run Go tests
+test: frontend-build ## Run Go tests (default tags, then -tags production for the build-tag guarded code)
 	$(GO) test $(GO_PKGS)
+	$(GO) test -tags production ./internal/adapter/desktop
 
-vet: frontend-build ## Run go vet
+vet: frontend-build ## Run go vet (default and production tags)
 	$(GO) vet $(GO_PKGS)
+	$(GO) vet -tags production $(GO_PKGS)
 
-lint: frontend-build ## Run golangci-lint (incl. depguard layering rules)
+lint: frontend-build ## Run golangci-lint (incl. depguard layering rules), default and production tags
 	golangci-lint run $(GO_PKGS)
+	golangci-lint run --build-tags production $(GO_PKGS)
 
 lint-selftest: frontend-build ## Prove every depguard/forbidigo layering rule still fires
 	bash scripts/depguard-selftest.sh
