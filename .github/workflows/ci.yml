@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # Wails needs CGO and a native webview per OS and cannot be cross-compiled
+    # (UI-0001), so every OS builds natively. Linux builds against GTK 4 and
+    # WebKitGTK 6.0, the default of Wails v3.1.
+    name: Check and build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - name: Install make
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install make -y --no-progress
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.15.0
+          install-only: true
+
+      - name: Install pinned tools (wails3, go-licenses)
+        run: |
+          make tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Check
+        run: make check
+
+      - name: Build
+        run: make build
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: commitbrief-ui-${{ runner.os }}
+          path: |
+            bin/
+            !bin/.wails-provider-checked
+          if-no-files-found: error
+          retention-days: 7

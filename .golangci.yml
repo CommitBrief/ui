@@ -1,0 +1,73 @@
+version: "2"
+
+# golangci-lint v2 schema. depguard enforces the layering rules from
+# .ssot/ui/HARITA.md: domain -> stdlib only; app -> domain + port; Wails only in
+# cmd/ and internal/adapter/desktop (UI-0001); os/exec only in the two adapters
+# that may spawn processes (UI-0003, UI-0005).
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - depguard
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+  settings:
+    depguard:
+      rules:
+        domain-stdlib-only:
+          list-mode: strict
+          files:
+            - "**/internal/domain/**"
+          allow:
+            - $gostd
+          deny:
+            - pkg: os/exec
+              desc: the domain performs no I/O and never spawns processes
+        app-domain-and-port-only:
+          list-mode: strict
+          files:
+            - "**/internal/app/**"
+          allow:
+            - $gostd
+            - github.com/CommitBrief/ui/internal/domain
+            - github.com/CommitBrief/ui/internal/port
+          deny:
+            - pkg: os/exec
+              desc: the application core spawns processes only through ports
+        wails-only-in-shell:
+          list-mode: lax
+          files:
+            - "!**/cmd/**"
+            - "!**/internal/adapter/desktop/**"
+          deny:
+            - pkg: github.com/wailsapp/wails/v3
+              desc: Wails may be imported only from cmd/ and internal/adapter/desktop (UI-0001)
+        exec-only-in-cli-and-gh-adapters:
+          list-mode: lax
+          files:
+            - "!**/internal/adapter/clicmd/**"
+            - "!**/internal/adapter/github/gh/**"
+          deny:
+            - pkg: os/exec
+              desc: only internal/adapter/clicmd (UI-0003) and internal/adapter/github/gh (UI-0005) may execute processes
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/CommitBrief/ui

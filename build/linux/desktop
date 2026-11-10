@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=CommitBrief UI
+Comment=Desktop companion for the CommitBrief CLI
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/commitbrief-ui %u
+Terminal=false
+Type=Application
+Icon=commitbrief-ui
+Categories=Utility;
+StartupWMClass=commitbrief-ui
+
+ 
