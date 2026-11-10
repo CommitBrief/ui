@@ -17,7 +17,12 @@ reviews, and schedule a background bot from the system tray.
 | Wails CLI | v3.1.0 (`make tools` installs the pinned version) |
 | macOS | Xcode command line tools |
 | Windows | WebView2 runtime, a C toolchain (CGO) |
-| Linux | GTK 4 and WebKitGTK 6.0 development packages, `build-essential`, `pkg-config` |
+| Linux (best effort) | GTK 4 and WebKitGTK 6.0 (`libgtk-4-dev`, `libwebkitgtk-6.0-dev`), `build-essential`, `pkg-config` |
+
+**Linux is best effort.** CommitBrief UI uses the Wails v3 default on Linux, which
+is GTK 4 with WebKitGTK 6.0. That needs a recent distribution (Ubuntu 24.04 or
+newer, or equivalent); older distributions that only ship GTK 3 /
+WebKitGTK 4.1 are not supported. macOS and Windows are the primary targets.
 
 On Debian/Ubuntu: `sudo apt install build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev`.
 

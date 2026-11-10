@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"os"
 	"sync/atomic"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -17,6 +18,9 @@ const (
 	appName = "CommitBrief UI"
 	// appID is the stable identifier used for single-instance detection.
 	appID = "com.commitbrief.ui"
+
+	// devServerEnv is set by `wails3 dev` when the frontend is served by Vite.
+	devServerEnv = "FRONTEND_DEVSERVER_URL"
 
 	mainWindowName   = "main"
 	mainWindowWidth  = 1100
@@ -54,11 +58,20 @@ func Run(opts Options) error {
 	}
 	s := &shell{log: logger}
 
+	csp := contentSecurityPolicy
+	if os.Getenv(devServerEnv) != "" {
+		// `make dev` serves the frontend from Vite, which needs inline
+		// scripts and a WebSocket; production builds never set this.
+		csp = ""
+		logger.Warn("frontend dev server in use; Content-Security-Policy disabled")
+	}
+
 	app := application.New(application.Options{
 		Name:        appName,
 		Description: "Desktop companion for the CommitBrief CLI",
 		Assets: application.AssetOptions{
-			Handler: application.AssetFileServerFS(opts.Assets),
+			Handler:    application.AssetFileServerFS(opts.Assets),
+			Middleware: securityMiddleware(csp, logger),
 		},
 		Mac: application.MacOptions{
 			// The scheduler must outlive the window (UI-0002).

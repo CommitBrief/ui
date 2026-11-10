@@ -15,9 +15,9 @@ GO_PKGS := . ./cmd/... ./internal/...
 WAILS3_VERSION      := v3.1.0
 GO_LICENSES_VERSION := v1.6.0
 
-FRONTEND_SRC := $(shell find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json frontend/package-lock.json frontend/bindings -type f 2>/dev/null)
+FRONTEND_SRC := $(shell find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json frontend/package-lock.json frontend/bindings internal/adapter/desktop/csp.txt -type f 2>/dev/null)
 
-.PHONY: help tools wails3-check build dev test vet lint fmt fmt-check tidy clean \
+.PHONY: help tools wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean \
 	license-check spdx-check i18n-check bindings-check \
 	frontend-deps frontend-build frontend-check check
 
@@ -63,16 +63,19 @@ vet: frontend-build ## Run go vet
 lint: frontend-build ## Run golangci-lint (incl. depguard layering rules)
 	golangci-lint run $(GO_PKGS)
 
+lint-selftest: frontend-build ## Prove every depguard/forbidigo layering rule still fires
+	bash scripts/depguard-selftest.sh
+
 fmt: ## Format Go source with gofmt (+ goimports if available)
-	gofmt -s -w .
+	gofmt -s -w *.go cmd internal
 	@if command -v goimports >/dev/null 2>&1; then \
-		goimports -w -local $(PKG) . ; \
+		goimports -w -local $(PKG) *.go cmd internal ; \
 	else \
 		echo "goimports not installed (go install golang.org/x/tools/cmd/goimports@latest)"; \
 	fi
 
 fmt-check:
-	@drift=$$(gofmt -l -s . | grep -v '^frontend/' || true); \
+	@drift=$$(gofmt -l -s *.go cmd internal || true); \
 	if [ -n "$$drift" ]; then \
 		echo "gofmt: needs '-s -w' on:"; echo "$$drift"; exit 1; \
 	fi
@@ -94,11 +97,13 @@ i18n-check: ## Fail if frontend/src/i18n/en.json and tr.json differ in keys
 
 bindings-check: wails3-check frontend-deps ## Fail if committed Wails bindings drift from the Go code
 	@tmp=$$(mktemp -d); \
-	wails3 generate bindings -d "$$tmp" -ts -i $(GO_PKGS) >/dev/null 2>&1 || { echo "bindings generation failed"; rm -rf "$$tmp"; exit 1; }; \
-	if diff -r "$$tmp" frontend/bindings >/dev/null 2>&1; then \
+	if ! wails3 generate bindings -d "$$tmp/out" -ts -i $(GO_PKGS) >"$$tmp/gen.log" 2>&1; then \
+		echo "bindings generation failed:"; cat "$$tmp/gen.log"; rm -rf "$$tmp"; exit 1; \
+	fi; \
+	if diff -r "$$tmp/out" frontend/bindings >"$$tmp/diff.log" 2>&1; then \
 		rm -rf "$$tmp"; echo "bindings-check: ok"; \
 	else \
-		diff -r "$$tmp" frontend/bindings | head -n 40; rm -rf "$$tmp"; \
+		head -n 40 "$$tmp/diff.log"; rm -rf "$$tmp"; \
 		echo "bindings drift: run 'wails3 generate bindings -clean=true -ts -i $(GO_PKGS)' and commit"; exit 1; \
 	fi
 
@@ -115,6 +120,8 @@ check: ## Run every guard CI runs
 	@$(MAKE) -s vet
 	@echo "==> golangci-lint"
 	@$(MAKE) -s lint
+	@echo "==> lint-selftest"
+	@$(MAKE) -s lint-selftest
 	@echo "==> go test"
 	@$(MAKE) -s test
 	@echo "==> license-check"

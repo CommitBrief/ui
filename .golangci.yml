@@ -13,6 +13,7 @@ linters:
   enable:
     - depguard
     - errcheck
+    - forbidigo
     - govet
     - staticcheck
     - unused
@@ -39,10 +40,18 @@ linters:
           deny:
             - pkg: os/exec
               desc: the application core spawns processes only through ports
+        # The next two rules list the directories they police (positive globs)
+        # and carve the allowed adapters out of that list. Depguard matches
+        # globs against absolute file paths, so a rule written as "everything
+        # except cmd/" would silently switch off for a checkout that lives under
+        # a directory named cmd. A positive list can only over-match (a visible
+        # false positive), never under-match. scripts/depguard-selftest.sh
+        # proves each rule fires.
         wails-only-in-shell:
           list-mode: lax
           files:
-            - "!**/cmd/**"
+            - "**/internal/**"
+            - "**/embed*.go"
             - "!**/internal/adapter/desktop/**"
           deny:
             - pkg: github.com/wailsapp/wails/v3
@@ -50,13 +59,34 @@ linters:
         exec-only-in-cli-and-gh-adapters:
           list-mode: lax
           files:
+            - "**/internal/**"
+            - "**/cmd/**"
+            - "**/embed*.go"
             - "!**/internal/adapter/clicmd/**"
             - "!**/internal/adapter/github/gh/**"
           deny:
             - pkg: os/exec
               desc: only internal/adapter/clicmd (UI-0003) and internal/adapter/github/gh (UI-0005) may execute processes
+            - pkg: golang.org/x/sys/execabs
+              desc: execabs is os/exec with a safer PATH lookup; the same single-exec-point rule applies
+    # Process-spawning calls that need no os/exec import. Same carve-out as the
+    # exec rule above (see the exclusions block).
+    forbidigo:
+      analyze-types: true
+      forbid:
+        - pattern: '^os\.StartProcess$'
+          msg: only internal/adapter/clicmd and internal/adapter/github/gh may start processes
+        - pattern: '^syscall\.(Exec|ForkExec|StartProcess)$'
+          msg: only internal/adapter/clicmd and internal/adapter/github/gh may start processes
+        - pattern: '^unix\.(Exec|ForkExec)$'
+          msg: only internal/adapter/clicmd and internal/adapter/github/gh may start processes
+        - pattern: '^windows\.CreateProcess[A-Za-z]*$'
+          msg: only internal/adapter/clicmd and internal/adapter/github/gh may start processes
   exclusions:
     rules:
+      - path: internal/adapter/(clicmd|github/gh)/
+        linters:
+          - forbidigo
       - path: _test\.go
         linters:
           - errcheck
