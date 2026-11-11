@@ -12,31 +12,81 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/CommitBrief/ui/internal/domain/errcode"
 )
 
+// tempDirRoot is an absolute, symlink-resolved temporary directory.
+func tempDirRoot(t *testing.T) string {
+	t.Helper()
+	d, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
 const fakeBinaryContent = "#!/bin/sh\necho commitbrief\n"
 
+// archiveEntry is one archive member, in the order the test wants it written.
+type archiveEntry struct {
+	Name string
+	Body string
+	Type byte   // tar type flag; 0 means a regular file
+	Link string // link target for tar.TypeSymlink / tar.TypeLink
+}
+
+func sortedEntries(m map[string]string) []archiveEntry {
+	names := make([]string, 0, len(m))
+	for n := range m {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	out := make([]archiveEntry, 0, len(names))
+	for _, n := range names {
+		out = append(out, archiveEntry{Name: n, Body: m[n]})
+	}
+	return out
+}
+
+// tarGz writes a tar.gz with the entries in sorted-name order (deterministic).
 func tarGz(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	return tarGzOrdered(t, sortedEntries(entries)...)
+}
+
+// tarGzOrdered writes the entries exactly in the given order.
+func tarGzOrdered(t *testing.T, entries ...archiveEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	for name, body := range entries {
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg}); err != nil {
+	for _, e := range entries {
+		typ := e.Type
+		if typ == 0 {
+			typ = tar.TypeReg
+		}
+		hdr := &tar.Header{Name: e.Name, Mode: 0o755, Typeflag: typ, Linkname: e.Link}
+		if typ == tar.TypeReg {
+			hdr.Size = int64(len(e.Body))
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tw.Write([]byte(body)); err != nil {
-			t.Fatal(err)
+		if typ == tar.TypeReg {
+			if _, err := tw.Write([]byte(e.Body)); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	if err := tw.Close(); err != nil {
@@ -48,16 +98,23 @@ func tarGz(t *testing.T, entries map[string]string) []byte {
 	return buf.Bytes()
 }
 
+// zipArchive writes a zip with the entries in sorted-name order (deterministic).
 func zipArchive(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	return zipOrdered(t, sortedEntries(entries)...)
+}
+
+// zipOrdered writes the entries exactly in the given order.
+func zipOrdered(t *testing.T, entries ...archiveEntry) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	for name, body := range entries {
-		w, err := zw.Create(name)
+	for _, e := range entries {
+		w, err := zw.Create(e.Name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := w.Write([]byte(body)); err != nil {
+		if _, err := w.Write([]byte(e.Body)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -214,14 +271,86 @@ func TestManagedInstallNoChecksumEntry(t *testing.T) {
 }
 
 func TestManagedInstallRejectsUnsafeInputs(t *testing.T) {
-	t.Run("archive entry that escapes", func(t *testing.T) {
-		data := t.TempDir()
-		rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGz(t, map[string]string{
-			"../evil":     "x",
-			"commitbrief": fakeBinaryContent,
-		}))
-		if _, err := rs.installer(data, "linux", "amd64").Install(context.Background()); err == nil || !strings.Contains(err.Error(), "escapes") {
-			t.Errorf("err = %v, want an escape refusal", err)
+	// The hostile entry is tried before AND after the binary: validation must not
+	// stop at the entry that was asked for (CI run 42941017242 hit exactly that,
+	// through map iteration order in an earlier version of this test).
+	bin := archiveEntry{Name: "commitbrief", Body: fakeBinaryContent}
+	hostile := []string{
+		"../evil", "a/../../evil", "/abs/evil", `..\evil`, `\\server\share\evil`, `C:\evil`, "C:/evil",
+		"commitbrief:stream", "dir/../../../etc/passwd",
+	}
+	for _, name := range hostile {
+		for _, after := range []bool{false, true} {
+			where := map[bool]string{false: "before", true: "after"}[after]
+			t.Run(fmt.Sprintf("tar entry %q %s the binary", name, where), func(t *testing.T) {
+				evil := archiveEntry{Name: name, Body: "x"}
+				entries := []archiveEntry{evil, bin}
+				if after {
+					entries = []archiveEntry{bin, evil}
+				}
+				data := tempDirRoot(t)
+				rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGzOrdered(t, entries...))
+				_, err := rs.installer(data, "linux", "amd64").Install(context.Background())
+				if err == nil || !strings.Contains(err.Error(), "escapes") {
+					t.Fatalf("err = %v, want an escape refusal", err)
+				}
+				if _, statErr := os.Stat(ManagedBinaryPath(data, "linux")); !os.IsNotExist(statErr) {
+					t.Error("a binary was installed from a hostile archive")
+				}
+			})
+			t.Run(fmt.Sprintf("zip entry %q %s the binary", name, where), func(t *testing.T) {
+				evil := archiveEntry{Name: name, Body: "x"}
+				entries := []archiveEntry{evil, {Name: "commitbrief.exe", Body: fakeBinaryContent}}
+				if after {
+					entries = []archiveEntry{entries[1], evil}
+				}
+				data := tempDirRoot(t)
+				rs := newReleaseServer(t, "v1.21.2", "windows", "amd64", zipOrdered(t, entries...))
+				_, err := rs.installer(data, "windows", "amd64").Install(context.Background())
+				if err == nil || !strings.Contains(err.Error(), "escapes") {
+					t.Fatalf("err = %v, want an escape refusal", err)
+				}
+			})
+		}
+	}
+	t.Run("a symlink that points outside is refused", func(t *testing.T) {
+		data := tempDirRoot(t)
+		rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGzOrdered(t, bin,
+			archiveEntry{Name: "link", Type: tar.TypeSymlink, Link: "../../etc/passwd"}))
+		if _, err := rs.installer(data, "linux", "amd64").Install(context.Background()); err == nil || !strings.Contains(err.Error(), "links outside") {
+			t.Errorf("err = %v", err)
+		}
+	})
+	t.Run("the binary entry as a symlink is refused", func(t *testing.T) {
+		data := tempDirRoot(t)
+		rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGzOrdered(t,
+			archiveEntry{Name: "commitbrief", Type: tar.TypeSymlink, Link: "somewhere-safe"}))
+		if _, err := rs.installer(data, "linux", "amd64").Install(context.Background()); err == nil {
+			t.Error("a symlink named commitbrief was accepted")
+		}
+	})
+	t.Run("a duplicate or case-folded binary entry is refused", func(t *testing.T) {
+		for _, dup := range []string{"commitbrief", "Commitbrief", "COMMITBRIEF"} {
+			data := tempDirRoot(t)
+			rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGzOrdered(t, bin, archiveEntry{Name: dup, Body: "other"}))
+			if _, err := rs.installer(data, "linux", "amd64").Install(context.Background()); err == nil {
+				t.Errorf("a second entry %q next to the binary was accepted", dup)
+			}
+			if _, statErr := os.Stat(ManagedBinaryPath(data, "linux")); !os.IsNotExist(statErr) {
+				t.Errorf("a binary was installed despite the ambiguous entry %q", dup)
+			}
+		}
+	})
+	t.Run("harmless entries are fine, in any position", func(t *testing.T) {
+		data := tempDirRoot(t)
+		rs := newReleaseServer(t, "v1.21.2", "linux", "amd64", tarGzOrdered(t,
+			archiveEntry{Name: "man/", Type: tar.TypeDir},
+			archiveEntry{Name: "man/commitbrief.1", Body: "man"},
+			bin,
+			archiveEntry{Name: "CHANGELOG.md", Body: "log"},
+		))
+		if _, err := rs.installer(data, "linux", "amd64").Install(context.Background()); err != nil {
+			t.Errorf("a normal release layout was refused: %v", err)
 		}
 	})
 	t.Run("archive without the binary", func(t *testing.T) {
@@ -293,5 +422,24 @@ func TestManagedAssetNameMatchesTheGoReleaserTemplate(t *testing.T) {
 	sums := parseChecksums([]byte(upper + "  a.tar.gz\n" + lower + " *b.zip\nbroken line\nshort  c.zip\n"))
 	if sums["a.tar.gz"] != strings.ToLower(upper) || sums["b.zip"] != lower || len(sums) != 2 {
 		t.Errorf("parseChecksums = %v", sums)
+	}
+}
+
+// TestManagedEntryNameCheck is the host-independent rule itself, including the
+// names no archive writer can produce (NUL).
+func TestManagedEntryNameCheck(t *testing.T) {
+	for _, ok := range []string{"commitbrief", "commitbrief.exe", "LICENSE", "man/commitbrief.1", "man/", "./commitbrief"} {
+		if err := checkEntryName(ok); err != nil {
+			t.Errorf("checkEntryName(%q) = %v, want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{
+		"", "..", "../x", "a/../../x", "/etc/passwd", `\\srv\share`, `\evil`, `..\x`, `a\..\..\x`,
+		`C:\x`, "C:/x", "c:x", "commitbrief.exe:ads", "bad\x00name", "a/..", "../",
+		"a/b/../c", // stricter than needed on purpose: a release archive never has a .. segment
+	} {
+		if err := checkEntryName(bad); err == nil {
+			t.Errorf("checkEntryName(%q) = nil, want a refusal", bad)
+		}
 	}
 }

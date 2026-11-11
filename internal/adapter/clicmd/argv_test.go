@@ -347,9 +347,7 @@ func TestArgvReachesTheProcessIntact(t *testing.T) {
 	if contains(rec.Args, "--allow-secrets") {
 		t.Errorf("argv %v contains --allow-secrets", rec.Args)
 	}
-	if rec.Cwd != repo {
-		t.Errorf("cwd = %q, want %q", rec.Cwd, repo)
-	}
+	sameDir(t, rec.Cwd, repo)
 	if rec.StdinBytes != 0 {
 		t.Errorf("stdin delivered %d bytes, want the null device", rec.StdinBytes)
 	}

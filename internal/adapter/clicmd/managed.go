@@ -336,15 +336,48 @@ func (m *ManagedInstaller) install(ctx context.Context) (InstalledCLI, error) {
 	return InstalledCLI{Path: target, Tag: rel.Tag}, nil
 }
 
-// checkEntryName rejects archive entries that could escape the target.
+// checkEntryName rejects archive entry names that could escape a target
+// directory on any host: absolute paths (Unix, drive-letter, UNC), ".."
+// segments after cleaning (both separators), NUL bytes, and a colon (a drive
+// letter, or an NTFS alternate data stream such as "commitbrief.exe:evil").
+// It is host-independent on purpose: the archive is checked the same way on
+// macOS, Linux and Windows, case-insensitive file systems included, because it
+// never depends on how the host would resolve the name.
 func checkEntryName(name string) error {
-	clean := path.Clean(strings.ReplaceAll(name, `\`, "/"))
-	if path.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, "../") || filepath.IsAbs(name) {
-		return fmt.Errorf("archive entry %q escapes the target directory", name)
+	bad := func() error { return fmt.Errorf("archive entry %q escapes the target directory", name) }
+	if name == "" || strings.ContainsAny(name, "\x00:") {
+		return bad()
+	}
+	slashed := strings.ReplaceAll(name, `\`, "/")
+	if strings.HasPrefix(slashed, "/") || filepath.IsAbs(name) {
+		return bad()
+	}
+	for _, seg := range strings.Split(slashed, "/") {
+		if seg == ".." {
+			return bad()
+		}
+	}
+	if clean := path.Clean(slashed); clean == ".." || strings.HasPrefix(clean, "../") || path.IsAbs(clean) {
+		return bad()
 	}
 	return nil
 }
 
+// checkLinkTarget applies the same rule to a symlink or hardlink target. The
+// installer never creates links, but an archive that carries an escaping one is
+// hostile and is refused as a whole.
+func checkLinkTarget(entry, target string) error {
+	if err := checkEntryName(target); err != nil {
+		return fmt.Errorf("archive entry %q links outside the target directory: %w", entry, err)
+	}
+	return nil
+}
+
+// extractTarGzEntry copies the single regular entry named want into w. The
+// whole archive is always read to the end and every entry vetted, even after the
+// wanted one was found: an archive with any unsafe entry is refused as a whole
+// (fail closed), and a second entry that names the binary, under the same or a
+// case-folded name, is refused as ambiguous.
 func extractTarGzEntry(r io.Reader, want string, w io.Writer) error {
 	gz, err := gzip.NewReader(r)
 	if err != nil {
@@ -352,10 +385,11 @@ func extractTarGzEntry(r io.Reader, want string, w io.Writer) error {
 	}
 	defer func() { _ = gz.Close() }()
 	tr := tar.NewReader(gz)
+	found := false
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			return fmt.Errorf("archive has no %q entry", want)
+			break
 		}
 		if err != nil {
 			return err
@@ -363,34 +397,63 @@ func extractTarGzEntry(r io.Reader, want string, w io.Writer) error {
 		if err := checkEntryName(hdr.Name); err != nil {
 			return err
 		}
-		if hdr.Name != want || hdr.Typeflag != tar.TypeReg {
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			if err := checkLinkTarget(hdr.Name, hdr.Linkname); err != nil {
+				return err
+			}
+		}
+		if !strings.EqualFold(hdr.Name, want) {
 			continue
 		}
-		return copyCapped(w, tr)
+		if hdr.Name != want || hdr.Typeflag != tar.TypeReg || found {
+			// A look-alike (case-folded), a link or a duplicate of the binary:
+			// on a case-insensitive file system these would collide with it.
+			return fmt.Errorf("archive has an ambiguous or non-regular entry for %q", want)
+		}
+		found = true
+		if err := copyCapped(w, tr); err != nil {
+			return err
+		}
 	}
+	if !found {
+		return fmt.Errorf("archive has no %q entry", want)
+	}
+	return nil
 }
 
+// extractZipEntry is extractTarGzEntry for zip archives.
 func extractZipEntry(r io.ReaderAt, size int64, want string, w io.Writer) error {
 	zr, err := zip.NewReader(r, size)
 	if err != nil {
 		return err
 	}
+	found := false
 	for _, f := range zr.File {
 		if err := checkEntryName(f.Name); err != nil {
 			return err
 		}
-		if f.Name != want || f.FileInfo().IsDir() {
+		if !strings.EqualFold(f.Name, want) {
 			continue
 		}
+		mode := f.FileInfo().Mode()
+		if f.Name != want || found || f.FileInfo().IsDir() || mode&os.ModeSymlink != 0 {
+			return fmt.Errorf("archive has an ambiguous or non-regular entry for %q", want)
+		}
+		found = true
 		rc, err := f.Open()
 		if err != nil {
 			return err
 		}
 		err = copyCapped(w, rc)
 		_ = rc.Close()
-		return err
+		if err != nil {
+			return err
+		}
 	}
-	return fmt.Errorf("archive has no %q entry", want)
+	if !found {
+		return fmt.Errorf("archive has no %q entry", want)
+	}
+	return nil
 }
 
 func copyCapped(w io.Writer, r io.Reader) error {

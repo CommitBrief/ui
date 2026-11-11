@@ -224,3 +224,24 @@ func localStaged(t *testing.T) port.LocalReviewRequest {
 	t.Helper()
 	return port.LocalReviewRequest{RepoPath: repoDir(t), Mode: port.LocalStaged}
 }
+
+// sameDir fails the test unless a and b name the same directory. It compares
+// file identity, not strings, so Windows 8.3 short names (RUNNER~1 vs
+// runneradmin), symlinks such as /var -> /private/var, and letter case on
+// case-insensitive file systems all compare equal.
+func sameDir(t *testing.T, got, want string) {
+	t.Helper()
+	gi, err := os.Stat(got)
+	if err != nil {
+		t.Errorf("cwd %q: %v", got, err)
+		return
+	}
+	wi, err := os.Stat(want)
+	if err != nil {
+		t.Errorf("expected dir %q: %v", want, err)
+		return
+	}
+	if !os.SameFile(gi, wi) {
+		t.Errorf("cwd = %q, want the same directory as %q", got, want)
+	}
+}

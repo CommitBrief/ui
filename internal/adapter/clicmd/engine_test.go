@@ -119,19 +119,14 @@ func TestEnginePreviewPR(t *testing.T) {
 	if !contains(rec.Args, "--no-cost-check") {
 		t.Errorf("an unattended preview must skip the cost prompt: %v", rec.Args)
 	}
-	wantDir, _ := filepath.EvalSymlinks(h.dataDir)
-	if rec.Cwd != wantDir {
-		t.Errorf("cwd = %q, want the data directory %q", rec.Cwd, wantDir)
-	}
+	sameDir(t, rec.Cwd, h.dataDir)
 
 	// With a local clone the CLI runs inside it.
 	clone := repoDir(t)
 	if _, err := h.engine.PreviewPR(context.Background(), port.PRRequest{Repo: "o/r", Number: 1, LocalPath: clone}); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.lastCall().Cwd; got != clone {
-		t.Errorf("cwd = %q, want %q", got, clone)
-	}
+	sameDir(t, h.lastCall().Cwd, clone)
 }
 
 func TestEngineCapabilitiesAndMinimumVersion(t *testing.T) {
@@ -227,7 +222,8 @@ func TestEngineConfigAndProviders(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec := h.lastCall()
-		if rec.Cwd != repo || !contains(rec.Args, "--local") || rec.Args[len(rec.Args)-2] != "output.lang" || rec.Args[len(rec.Args)-1] != "tr" {
+		sameDir(t, rec.Cwd, repo)
+		if !contains(rec.Args, "--local") || rec.Args[len(rec.Args)-2] != "output.lang" || rec.Args[len(rec.Args)-1] != "tr" {
 			t.Errorf("call = %+v", rec)
 		}
 	})
@@ -290,7 +286,8 @@ func TestEngineConfigAndProviders(t *testing.T) {
 			t.Fatal(err)
 		}
 		rec := h.lastCall()
-		if rec.Cwd != repo || !contains(rec.Args, "--local") || rec.Args[len(rec.Args)-1] != "openai" {
+		sameDir(t, rec.Cwd, repo)
+		if !contains(rec.Args, "--local") || rec.Args[len(rec.Args)-1] != "openai" {
 			t.Errorf("call = %+v", rec)
 		}
 	})
