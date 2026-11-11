@@ -23,6 +23,25 @@ export default tseslint.config(
         { property: "innerHTML", message: "Never render untrusted content with innerHTML." },
         { property: "outerHTML", message: "Never render untrusted content with outerHTML." },
       ],
+      // Equivalent of react/no-danger. eslint-plugin-react declares no ESLint 10
+      // support (peer range stops at ^9.7), so the rule is expressed with core
+      // selectors: JSX attribute, object key and member access are all covered.
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "JSXAttribute[name.name='dangerouslySetInnerHTML']",
+          message: "dangerouslySetInnerHTML is banned: untrusted content must never be rendered as HTML (UI-0001 section 4).",
+        },
+        {
+          // Quoted key: { "dangerouslySetInnerHTML": ... }
+          selector: "Property > Literal[value='dangerouslySetInnerHTML']",
+          message: "dangerouslySetInnerHTML is banned: untrusted content must never be rendered as HTML (UI-0001 section 4).",
+        },
+        {
+          selector: "Identifier[name='dangerouslySetInnerHTML']",
+          message: "dangerouslySetInnerHTML is banned: untrusted content must never be rendered as HTML (UI-0001 section 4).",
+        },
+      ],
     },
   },
   {

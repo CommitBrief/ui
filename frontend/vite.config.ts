@@ -43,5 +43,9 @@ export default defineConfig({
     port: Number(process.env["WAILS_VITE_PORT"]) || 9245,
     strictPort: true,
   },
+  build: {
+    // The CSP has no `data:` source: never inline fonts or other assets as data URIs.
+    assetsInlineLimit: 0,
+  },
   plugins: [react(), wails("./bindings"), contentSecurityPolicyMeta()],
 });

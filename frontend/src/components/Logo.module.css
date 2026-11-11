@@ -1,0 +1,11 @@
+.stopTop {
+  stop-color: var(--term-green);
+}
+
+.stopBottom {
+  stop-color: var(--term-green-dim);
+}
+
+.arrow {
+  stroke: var(--ink-950);
+}

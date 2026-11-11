@@ -1,0 +1,77 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-text);
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+}
+
+.error {
+  display: flex;
+  gap: var(--space-1);
+  font-size: var(--text-xs);
+  color: var(--color-danger-text);
+}
+
+.control {
+  width: 100%;
+  min-height: var(--control-height);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-control);
+  border-radius: var(--radius-md);
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  font-size: var(--text-sm);
+}
+
+.control::placeholder {
+  color: var(--color-text-muted);
+  opacity: 1;
+}
+
+.control:hover:not(:disabled) {
+  border-color: var(--color-text-muted);
+}
+
+.control:focus-visible {
+  outline-offset: 0;
+  border-color: var(--color-focus);
+}
+
+.control:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.control[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+
+.selectWrap {
+  position: relative;
+}
+
+.select {
+  appearance: none;
+  padding-right: var(--space-6);
+  cursor: pointer;
+}
+
+.chevron {
+  position: absolute;
+  top: 50%;
+  right: var(--space-3);
+  translate: 0 -50%;
+  color: var(--color-text-muted);
+  pointer-events: none;
+}

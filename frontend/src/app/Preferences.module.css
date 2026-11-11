@@ -1,0 +1,31 @@
+.trigger {
+  justify-content: flex-start;
+  width: 100%;
+  padding-inline: var(--space-3);
+  text-align: start;
+  white-space: normal;
+  line-height: var(--leading-tight);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+@media (max-width: 760px) {
+  .trigger {
+    justify-content: center;
+    width: 2.5rem;
+    padding: 0;
+  }
+
+  .triggerLabel {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
