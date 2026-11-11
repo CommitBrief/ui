@@ -24,8 +24,9 @@ type prTaskSpec struct {
 }
 
 // ReviewPR reviews one pull request: `commitbrief remote pr N --repo o/r
-// --no-post --json` in preview mode. Post mode calls PostPR, which answers
-// capability_missing until phase 12 wires it. One job targets exactly one
+// --no-post --json` in preview mode. It never posts: posting needs the recorded
+// consent of UI-0008, which only the bot job carries, so a post job is refused
+// in Plan (and again in Execute). One job targets exactly one
 // repository; a local path, when the repository has one, is the working
 // directory so the project's own rules apply.
 type ReviewPR struct {
@@ -58,6 +59,9 @@ func (k *ReviewPR) Plan(ctx context.Context, j job.Job) ([]run.Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := spec.ValidateFor(j.Mode); err != nil {
+		return nil, err
+	}
 	r, err := lookupTarget(ctx, k.repos, j)
 	if err != nil {
 		return nil, err
@@ -86,6 +90,9 @@ func (k *ReviewPR) Execute(ctx context.Context, t run.Task, progress func(string
 	if err := json.Unmarshal(t.Spec, &spec); err != nil || (job.PRReviewSpec{Number: spec.Number}).Validate() != nil || !spec.Mode.Valid() {
 		return run.Outcome{}, errcode.New(errcode.Unknown, "the task spec is not a pull request review")
 	}
+	if (job.PRReviewSpec{}).ValidateFor(spec.Mode) != nil {
+		return run.Outcome{}, errcode.New(errcode.Unknown, "a pull request review is a preview; posting needs the bot job's consent")
+	}
 	r, err := executeRepo(ctx, k.repos, t, spec.LocalPath)
 	if err != nil {
 		return run.Outcome{}, err
@@ -95,10 +102,6 @@ func (k *ReviewPR) Execute(ctx context.Context, t run.Task, progress func(string
 		Number:    spec.Number,
 		LocalPath: r.LocalPath,
 		Options:   port.RunOptions{OnProgress: progress},
-	}
-	if spec.Mode == job.ModePost {
-		rep, err := k.engine.PostPR(ctx, req)
-		return finish(ctx, k.engine, rep, err)
 	}
 	rep, err := k.engine.PreviewPR(ctx, req)
 	return finish(ctx, k.engine, rep, err)

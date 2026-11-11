@@ -19,6 +19,9 @@ import (
 	"github.com/CommitBrief/ui/internal/port"
 )
 
+// dbWait bounds a store write made after the task context may have ended.
+const dbWait = 15 * time.Second
+
 // lookupTarget loads the single target repository of a job. A repository that
 // does not exist is a *run.Error the frontend can word.
 func lookupTarget(ctx context.Context, repos port.RepoStore, j job.Job) (repo.Repository, error) {

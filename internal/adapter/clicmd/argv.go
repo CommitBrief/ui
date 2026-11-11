@@ -175,6 +175,25 @@ func previewPRArgs(req port.PRRequest, timeout time.Duration) ([]string, error) 
 	return append(args, commonFlags(timeout, req.Options.Unattended)...), nil
 }
 
+// postPRArgs builds `commitbrief remote pr N --repo owner/name --json
+// --since-last-review --max-verdict comment ...`: the posting mode (no
+// --no-post). The verdict ceiling is fixed here, not a parameter: the UI never
+// submits an approval (UI-0008 section 3). --since-last-review makes later runs
+// on the same pull request incremental (CLI ADR-0046).
+func postPRArgs(req port.PRRequest, timeout time.Duration) ([]string, error) {
+	if err := validateRepo(req.Repo); err != nil {
+		return nil, err
+	}
+	if err := validatePRNumber(req.Number); err != nil {
+		return nil, err
+	}
+	args := []string{
+		"remote", "pr", strconv.Itoa(req.Number), "--repo", req.Repo,
+		"--json", "--since-last-review", "--max-verdict", "comment",
+	}
+	return append(args, commonFlags(timeout, req.Options.Unattended)...), nil
+}
+
 func configGetArgs(key string, timeout time.Duration) ([]string, error) {
 	if err := validateConfigKey(key); err != nil {
 		return nil, err

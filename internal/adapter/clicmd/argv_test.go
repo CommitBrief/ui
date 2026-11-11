@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -461,6 +462,39 @@ func TestArgvSecretValueNeverInArgv(t *testing.T) {
 	for _, bad := range []string{"", "two\nlines", "cr\rvalue"} {
 		if _, _, _, err := configSetArgs("providers.x.api_key", bad, port.UserScope(), time.Minute); err == nil {
 			t.Errorf("secret value %q was accepted", bad)
+		}
+	}
+}
+
+// The bot posts under the user's own name (UI-0008): the ceiling is part of the
+// argv, always, and the call is never a preview.
+func TestBotPostArgvCarriesTheVerdictCeiling(t *testing.T) {
+	args, err := postPRArgs(port.PRRequest{Repo: "Acme/App", Number: 7, Options: port.RunOptions{Unattended: true}}, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := indexOf(args, "--max-verdict")
+	if i < 0 || i+1 >= len(args) || args[i+1] != "comment" {
+		t.Fatalf("argv %v must carry --max-verdict comment", args)
+	}
+	if contains(args, "--no-post") || contains(args, flagAllowSecrets) {
+		t.Errorf("argv %v: posting mode has no --no-post and never --allow-secrets", args)
+	}
+	if !contains(args, "--since-last-review") || !contains(args, "--json") || !contains(args, "--no-cost-check") {
+		t.Errorf("argv %v lacks an incremental, machine-readable, unattended run", args)
+	}
+	want := []string{"remote", "pr", "7", "--repo", "Acme/App"}
+	if !reflect.DeepEqual(args[:len(want)], want) {
+		t.Errorf("argv = %v, want prefix %v", args, want)
+	}
+	if assertNoForbiddenArgs(args) != nil {
+		t.Error("the posting argv trips the forbidden-flag gate")
+	}
+
+	// The same input checks as a preview.
+	for _, bad := range []port.PRRequest{{Repo: "a/b;ls", Number: 1}, {Repo: "a/b", Number: 0}, {Repo: "a/b", Number: -3}, {Repo: "ab", Number: 1}} {
+		if _, err := postPRArgs(bad, time.Minute); err == nil {
+			t.Errorf("%+v was accepted", bad)
 		}
 	}
 }

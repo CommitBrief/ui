@@ -106,7 +106,7 @@ func TestMigrationOnEmptyDatabase(t *testing.T) {
 	path := dbPath(t)
 	s := openAt(t, path)
 
-	want := []string{"job_targets", "jobs", "repositories", "runs", "schedules", "schema_migrations", "settings", "tasks", "tracked_prs"}
+	want := []string{"bot_reviews", "job_targets", "jobs", "repositories", "runs", "schedules", "schema_migrations", "settings", "tasks", "tracked_prs"}
 	if got := tableNames(t, s.db); !equalStrings(got, want) {
 		t.Errorf("tables = %v, want %v", got, want)
 	}

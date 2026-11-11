@@ -40,6 +40,7 @@ func TestJobValidate(t *testing.T) {
 		{"long name", func(j *Job) { j.Name = strings.Repeat("a", MaxNameLen+1) }, CodeNameInvalid, "name"},
 		{"control character", func(j *Job) { j.Name = "a\nb" }, CodeNameInvalid, "name"},
 		{"unknown mode", func(j *Job) { j.Mode = "dry" }, CodeModeInvalid, "mode"},
+		{"pull request review cannot post", func(j *Job) { j.Kind, j.Mode, j.Spec = KindReviewPR, ModePost, json.RawMessage(`{"number":7}`) }, CodeModeInvalid, "mode"},
 		{"local review cannot post", func(j *Job) { j.Kind, j.Mode, j.Spec = KindReviewLocal, ModePost, json.RawMessage(`{}`) }, CodeModeInvalid, "mode"},
 		{"empty spec", func(j *Job) { j.Spec = nil }, CodeSpecInvalid, "spec"},
 		{"spec not an object", func(j *Job) { j.Spec = json.RawMessage(`[1]`) }, CodeSpecInvalid, "spec"},
@@ -64,7 +65,7 @@ func TestJobValidate(t *testing.T) {
 	// A kind the domain has no descriptor for (a later phase's) only gets the
 	// shape checks.
 	future := valid()
-	future.Kind, future.Targets, future.Mode = "bot.review_requested", []int64{1, 2, 3}, ModePost
+	future.Kind, future.Targets, future.Mode = "bot.future_kind", []int64{1, 2, 3}, ModePost
 	if err := future.Validate(); err != nil {
 		t.Errorf("an unregistered kind was refused: %v", err)
 	}
@@ -72,15 +73,23 @@ func TestJobValidate(t *testing.T) {
 
 func TestDescriptors(t *testing.T) {
 	ds := Descriptors()
-	if len(ds) != 2 || ds[0].Kind != KindReviewLocal || ds[1].Kind != KindReviewPR {
+	if len(ds) != 3 || ds[0].Kind != KindReviewLocal || ds[1].Kind != KindReviewPR || ds[2].Kind != KindBotReviewRequested {
 		t.Fatalf("Descriptors = %+v", ds)
 	}
 	ds[0].Kind = "mutated.kind"
 	if again := Descriptors(); again[0].Kind != KindReviewLocal {
 		t.Error("Descriptors returned the internal slice")
 	}
-	if d, ok := Lookup(KindReviewPR); !ok || !d.supports(ModePost) {
+	// A one-off pull request review never posts; only the bot job carries the
+	// consent UI-0008 asks for.
+	if d, ok := Lookup(KindReviewPR); !ok || d.supports(ModePost) || !d.supports(ModePreview) {
 		t.Errorf("Lookup(review.pr) = %+v, %v", d, ok)
+	}
+	if d, ok := Lookup(KindBotReviewRequested); !ok || !d.supports(ModePost) {
+		t.Errorf("Lookup(bot.review_requested) = %+v, %v", d, ok)
+	}
+	if c, f := code((PRReviewSpec{Number: 1}).ValidateFor(ModePost)); c != CodeModeInvalid || f != "mode" {
+		t.Errorf("PRReviewSpec.ValidateFor(post) = %v, %v", c, f)
 	}
 	if _, ok := Lookup("nope.kind"); ok {
 		t.Error("Lookup found an unknown kind")

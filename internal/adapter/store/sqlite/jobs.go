@@ -13,6 +13,7 @@ import (
 	sqlitedrv "modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
+	"github.com/CommitBrief/ui/internal/domain/schedule"
 	"github.com/CommitBrief/ui/internal/port"
 )
 
@@ -24,7 +25,7 @@ type jobStore struct {
 
 var _ port.JobStore = jobStore{}
 
-const jobColumns = "id, kind, name, spec_json, spec_version, mode, enabled, created_at"
+const jobColumns = "id, kind, name, spec_json, spec_version, mode, enabled, created_at, attention_code, attention_at"
 
 // inTx runs fn inside a transaction: the one already open when q is a
 // transaction, otherwise a new one on the pool. Multi-statement writes (a job
@@ -62,7 +63,10 @@ func (s jobStore) CreateJob(ctx context.Context, j port.JobRecord) (port.JobReco
 			return fmt.Errorf("sqlite: create job: %w", err)
 		}
 		j.ID = id
-		return insertTargets(ctx, q, id, j.RepositoryIDs)
+		if err := insertTargets(ctx, q, id, j.RepositoryIDs); err != nil {
+			return err
+		}
+		return insertWindows(ctx, q, id, j.Windows)
 	})
 	if err != nil {
 		return port.JobRecord{}, err
@@ -70,6 +74,8 @@ func (s jobStore) CreateJob(ctx context.Context, j port.JobRecord) (port.JobReco
 	j.CreatedAt = created
 	j.SpecVersion = specVersion(j.SpecVersion)
 	j.RepositoryIDs = append([]int64{}, j.RepositoryIDs...)
+	j.Windows = append([]schedule.Window{}, j.Windows...)
+	j.AttentionCode, j.AttentionAt = "", nil
 	return j, nil
 }
 
@@ -105,6 +111,11 @@ func (s jobStore) GetJob(ctx context.Context, id int64) (port.JobRecord, error) 
 		return port.JobRecord{}, err
 	}
 	j.RepositoryIDs = targets[id]
+	ws, err := s.windows(ctx, id)
+	if err != nil {
+		return port.JobRecord{}, err
+	}
+	j.Windows = nonNilWindows(ws[id])
 	return j, nil
 }
 
@@ -131,10 +142,22 @@ func (s jobStore) ListJobs(ctx context.Context) ([]port.JobRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	ws, err := s.windows(ctx, 0)
+	if err != nil {
+		return nil, err
+	}
 	for i := range out {
 		out[i].RepositoryIDs = targets[out[i].ID]
+		out[i].Windows = nonNilWindows(ws[out[i].ID])
 	}
 	return out, nil
+}
+
+func nonNilWindows(ws []schedule.Window) []schedule.Window {
+	if ws == nil {
+		return []schedule.Window{}
+	}
+	return ws
 }
 
 // targets returns the target repository IDs per job: of one job, or of every
@@ -180,8 +203,31 @@ func (s jobStore) UpdateJob(ctx context.Context, j port.JobRecord) error {
 		if _, err := q.ExecContext(ctx, "DELETE FROM job_targets WHERE job_id = ?", j.ID); err != nil {
 			return fmt.Errorf("sqlite: update job targets: %w", err)
 		}
-		return insertTargets(ctx, q, j.ID, j.RepositoryIDs)
+		if err := insertTargets(ctx, q, j.ID, j.RepositoryIDs); err != nil {
+			return err
+		}
+		if _, err := q.ExecContext(ctx, "DELETE FROM schedules WHERE job_id = ?", j.ID); err != nil {
+			return fmt.Errorf("sqlite: update job windows: %w", err)
+		}
+		return insertWindows(ctx, q, j.ID, j.Windows)
 	})
+}
+
+func (s jobStore) SetAttention(ctx context.Context, id int64, code string, at time.Time) error {
+	res, err := s.q.ExecContext(ctx, "UPDATE jobs SET attention_code = ?, attention_at = ? WHERE id = ?",
+		nullable(code), formatTime(at.UTC().Truncate(time.Millisecond)), id)
+	if err != nil {
+		return fmt.Errorf("sqlite: set job attention: %w", err)
+	}
+	return requireAffected(res, "set job attention")
+}
+
+func (s jobStore) ClearAttention(ctx context.Context, id int64) error {
+	res, err := s.q.ExecContext(ctx, "UPDATE jobs SET attention_code = NULL, attention_at = NULL WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("sqlite: clear job attention: %w", err)
+	}
+	return requireAffected(res, "clear job attention")
 }
 
 func (s jobStore) DeleteJob(ctx context.Context, id int64) error {
@@ -194,12 +240,14 @@ func (s jobStore) DeleteJob(ctx context.Context, id int64) error {
 
 func scanJob(sc scanner) (port.JobRecord, error) {
 	var (
-		j       port.JobRecord
-		spec    string
-		enabled int
-		created string
+		j         port.JobRecord
+		spec      string
+		enabled   int
+		created   string
+		attention sql.NullString
+		attnAt    sql.NullString
 	)
-	if err := sc.Scan(&j.ID, &j.Kind, &j.Name, &spec, &j.SpecVersion, &j.Mode, &enabled, &created); err != nil {
+	if err := sc.Scan(&j.ID, &j.Kind, &j.Name, &spec, &j.SpecVersion, &j.Mode, &enabled, &created, &attention, &attnAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return port.JobRecord{}, port.ErrNotFound
 		}
@@ -212,6 +260,16 @@ func scanJob(sc scanner) (port.JobRecord, error) {
 	j.Spec = json.RawMessage(spec)
 	j.Enabled = enabled != 0
 	j.CreatedAt = t
+	if attention.Valid {
+		j.AttentionCode = attention.String
+		if attnAt.Valid {
+			at, err := parseTime(attnAt.String)
+			if err != nil {
+				return port.JobRecord{}, err
+			}
+			j.AttentionAt = &at
+		}
+	}
 	return j, nil
 }
 

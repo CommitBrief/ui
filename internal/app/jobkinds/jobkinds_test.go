@@ -37,6 +37,8 @@ type fakeEngine struct {
 	localReq  *port.LocalReviewRequest
 	prReq     *port.PRRequest
 	postReq   *port.PRRequest
+	prAll     []port.PRRequest // every preview request, in order
+	postAll   []port.PRRequest // every post request, in order
 	report    review.Report
 	err       error
 	progress  []string
@@ -60,6 +62,7 @@ func (f *fakeEngine) ReviewLocal(_ context.Context, req port.LocalReviewRequest)
 
 func (f *fakeEngine) PreviewPR(_ context.Context, req port.PRRequest) (review.Report, error) {
 	f.prReq = &req
+	f.prAll = append(f.prAll, req)
 	for _, l := range f.progress {
 		req.Options.OnProgress(l)
 	}
@@ -68,8 +71,12 @@ func (f *fakeEngine) PreviewPR(_ context.Context, req port.PRRequest) (review.Re
 
 func (f *fakeEngine) PostPR(_ context.Context, req port.PRRequest) (port.PostResult, error) {
 	f.postReq = &req
+	f.postAll = append(f.postAll, req)
 	return f.report, f.err
 }
+
+func (f *fakeEngine) prReqs() []port.PRRequest   { return f.prAll }
+func (f *fakeEngine) postReqs() []port.PRRequest { return f.postAll }
 
 func sampleReport() review.Report {
 	return review.Report{
@@ -330,29 +337,27 @@ func TestReviewPRExecutePreview(t *testing.T) {
 	}
 }
 
-// Post mode goes through PostPR, which answers capability_missing until phase 12;
-// the run then ends as attention. A successful post carries the remote's head
-// and verdict into the outcome.
-func TestReviewPRExecutePost(t *testing.T) {
-	eng := &fakeEngine{versionOK: true, err: errcode.New(errcode.CapabilityMissing, "")}
+// A one-off pull request review never posts: posting needs the consent only the
+// bot job records (UI-0008). Plan refuses a post job, and Execute refuses a
+// post task that reached it some other way; PostPR is never called.
+func TestReviewPRNeverPosts(t *testing.T) {
+	eng := &fakeEngine{versionOK: true}
 	rs := repos(t)
 	k := NewReviewPR(rs, eng)
-	tasks, _ := k.Plan(context.Background(), prJob(1, 7, job.ModePost))
 
-	_, err := k.Execute(context.Background(), tasks[0], func(string) {})
-	if !errcode.Is(err, errcode.CapabilityMissing) || eng.postReq == nil || eng.prReq != nil {
-		t.Errorf("post without capability: %v (post %v, preview %v)", err, eng.postReq, eng.prReq)
-	}
-	if status, _ := run.Classify(err); status != run.StatusAttention {
-		t.Errorf("capability_missing ended %s, want attention", status)
+	_, err := k.Plan(context.Background(), prJob(1, 7, job.ModePost))
+	var je *job.Error
+	if !errors.As(err, &je) || je.Code != job.CodeModeInvalid || je.Field != "mode" {
+		t.Fatalf("Plan(post) = %v, want job_mode_invalid on mode", err)
 	}
 
-	eng.err = nil
-	eng.report = sampleReport()
-	eng.report.Remote = &review.Remote{Status: review.RemoteSubmitted, HeadOID: "abc123", Verdict: review.VerdictRequestChanges}
-	out, err := k.Execute(context.Background(), tasks[0], func(string) {})
-	if err != nil || out.HeadOID != "abc123" || out.Verdict != "request-changes" {
-		t.Errorf("posted outcome = %+v, %v", out, err)
+	spec, _ := json.Marshal(prTaskSpec{Number: 7, Mode: job.ModePost})
+	tk := run.Task{Kind: job.KindReviewPR, RepositoryID: 1, PRNumber: 7, Spec: spec}
+	if _, err := k.Execute(context.Background(), tk, func(string) {}); !errcode.Is(err, errcode.Unknown) {
+		t.Errorf("Execute(post task) = %v", err)
+	}
+	if eng.postReq != nil || eng.prReq != nil {
+		t.Errorf("the engine was called: post %v, preview %v", eng.postReq, eng.prReq)
 	}
 }
 

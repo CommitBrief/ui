@@ -14,10 +14,12 @@ import (
 	"time"
 
 	ui "github.com/CommitBrief/ui"
+	"github.com/CommitBrief/ui/internal/adapter/autostart"
 	"github.com/CommitBrief/ui/internal/adapter/clicmd"
 	"github.com/CommitBrief/ui/internal/adapter/desktop"
 	"github.com/CommitBrief/ui/internal/adapter/github/gh"
 	"github.com/CommitBrief/ui/internal/adapter/gitinfo"
+	"github.com/CommitBrief/ui/internal/adapter/notify"
 	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
 	"github.com/CommitBrief/ui/internal/app"
 	"github.com/CommitBrief/ui/internal/app/jobkinds"
@@ -92,12 +94,15 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		DataDir:      dirs.Data,
 		OverridePath: func() string { return settingsSvc.CLIPathOverride() },
 	})
+	// One gh client: Settings asks it who is logged in, the bot asks it for the
+	// pull requests.
+	ghClient := gh.New(gh.Config{})
 	settingsSvc = app.NewSettings(app.SettingsDeps{
 		Engine: engine,
 		Tx:     store,
 		Store:  store.Settings(),
 		Repos:  store.Repos(),
-		GitHub: gh.New(gh.Config{}),
+		GitHub: ghClient,
 		Env:    platform.OSEnv{},
 	})
 	if err := settingsSvc.Load(ctx); err != nil {
@@ -111,21 +116,56 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		logger.Warn("reading the UI settings failed; using the defaults", "error", err, "cause", cause)
 	}
 
-	runs, err := newRuns(ctx, store, engine, dirs, logger)
+	clock := platform.SystemClock{}
+	budget := app.NewBudget(app.BudgetDeps{Settings: store.Settings(), Costs: store.Costs(), Clock: clock})
+	runs, err := newRuns(ctx, store, engine, ghClient, budget, clock, dirs, logger)
 	if err != nil {
 		_ = store.Close()
 		_ = lock.Release()
 		return desktop.State{}, err
 	}
 
+	// The scheduler lives as long as the process (UI-0002): it starts after the
+	// run service, has its first look at once (the catch-up after a launch) and
+	// stops before the reviews it started are stopped.
+	// Notifications are queued and shown from the notifier's own goroutine: the
+	// first one can sit behind an operating system permission dialog for minutes.
+	notifier := notify.New(notify.NewLazy(desktop.NewNotificationSender().Open), logger)
+	scheduler := app.NewScheduler(app.SchedulerDeps{
+		Jobs:     store.Jobs(),
+		Runs:     store.Runs(),
+		Settings: store.Settings(),
+		Trigger:  runs,
+		Budget:   budget,
+		Notifier: notifier,
+		Clock:    clock,
+		Logger:   logger,
+	})
+	scheduler.Start(context.Background())
+
 	return desktop.State{
 		Repos:    app.NewRepos(store.Repos(), store, gitinfo.New()),
 		Health:   app.NewHealth(store),
 		Settings: settingsSvc,
 		Jobs:     runs,
+		Schedules: app.NewSchedules(app.SchedulesDeps{
+			Jobs:      store.Jobs(),
+			Runner:    runs,
+			Budget:    budget,
+			AutoStart: autostart.New(autostart.Config{}),
+			Clock:     clock,
+			Logger:    logger,
+		}),
 		Close: func() error {
-			// Stop the running reviews first (their CLI process trees die
-			// with their context), then let go of the database.
+			// Stop scheduling first, then the running reviews (their CLI
+			// process trees die with their context), then let go of the
+			// database.
+			scheduler.Stop()
+			// A notification still waiting behind a permission dialog is let go
+			// after a moment; quitting never waits for the dialog.
+			flush, flushCancel := context.WithTimeout(context.Background(), notifierShutdownGrace)
+			notifier.Close(flush)
+			flushCancel()
 			stop, cancel := context.WithTimeout(context.Background(), runsShutdownGrace)
 			defer cancel()
 			return errors.Join(runs.Close(stop), store.Close(), lock.Release())
@@ -137,14 +177,28 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 // CLI adapter's own SIGTERM-to-SIGKILL window is 5 seconds.
 const runsShutdownGrace = 15 * time.Second
 
-// newRuns builds the manual-jobs service: the two job kinds on top of the CLI
-// adapter, the stores, the Wails event emitter and the log directory. Start
-// marks what an earlier process left unfinished as canceled and applies the log
-// retention policy once.
-func newRuns(ctx context.Context, store *sqlite.Store, engine *clicmd.Engine, dirs platform.Dirs, logger *slog.Logger) (*app.Runs, error) {
+// notifierShutdownGrace is how long quitting lets queued notifications reach the
+// screen before it gives up on them.
+const notifierShutdownGrace = time.Second
+
+// newRuns builds the run service: the job kinds on top of the CLI adapter (and,
+// for the bot, gh), the stores, the Wails event emitter and the log directory.
+// Start marks what an earlier process left unfinished as canceled and applies
+// the log retention policy once.
+func newRuns(ctx context.Context, store *sqlite.Store, engine *clicmd.Engine, ghClient *gh.Client, budget *app.Budget, clock platform.SystemClock, dirs platform.Dirs, logger *slog.Logger) (*app.Runs, error) {
 	kinds, err := app.NewKindRegistry(
 		jobkinds.NewReviewLocal(store.Repos(), engine),
 		jobkinds.NewReviewPR(store.Repos(), engine),
+		jobkinds.NewBotReviewRequested(jobkinds.BotDeps{
+			Repos:   store.Repos(),
+			Tracked: store.Tracked(),
+			Jobs:    store.Jobs(),
+			Source:  ghClient,
+			Engine:  engine,
+			Budget:  budget,
+			Clock:   clock,
+			Logger:  logger,
+		}),
 	)
 	if err != nil {
 		return nil, err

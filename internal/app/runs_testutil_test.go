@@ -103,9 +103,77 @@ func (m *memDB) GetJob(_ context.Context, id int64) (port.JobRecord, error) {
 	return j, nil
 }
 
-func (m *memDB) ListJobs(context.Context) ([]port.JobRecord, error) { return nil, nil }
-func (m *memDB) UpdateJob(context.Context, port.JobRecord) error    { return nil }
-func (m *memDB) DeleteJob(context.Context, int64) error             { return nil }
+func (m *memDB) ListJobs(context.Context) ([]port.JobRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]port.JobRecord, 0, len(m.jobs))
+	for _, j := range m.jobs {
+		out = append(out, j)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, nil
+}
+
+func (m *memDB) UpdateJob(_ context.Context, j port.JobRecord) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.jobs[j.ID]
+	if !ok {
+		return port.ErrNotFound
+	}
+	cur.Name, cur.Spec, cur.SpecVersion, cur.Mode, cur.Enabled = j.Name, j.Spec, j.SpecVersion, j.Mode, j.Enabled
+	cur.RepositoryIDs, cur.Windows = j.RepositoryIDs, j.Windows
+	m.jobs[j.ID] = cur
+	return nil
+}
+
+func (m *memDB) DeleteJob(_ context.Context, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.jobs[id]; !ok {
+		return port.ErrNotFound
+	}
+	delete(m.jobs, id)
+	return nil
+}
+
+func (m *memDB) SetAttention(_ context.Context, id int64, code string, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return port.ErrNotFound
+	}
+	j.AttentionCode, j.AttentionAt = code, &at
+	m.jobs[id] = j
+	return nil
+}
+
+func (m *memDB) ClearAttention(_ context.Context, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j, ok := m.jobs[id]
+	if !ok {
+		return port.ErrNotFound
+	}
+	j.AttentionCode, j.AttentionAt = "", nil
+	m.jobs[id] = j
+	return nil
+}
+
+// CostSince is the port.CostMeter of the in-memory store: the summed cost of the
+// tasks that finished at or after since.
+func (m *memDB) CostSince(_ context.Context, since time.Time) (float64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var sum float64
+	for _, t := range m.tasks {
+		if t.FinishedAt != nil && !t.FinishedAt.Before(since) {
+			sum += t.CostUSD
+		}
+	}
+	return sum, nil
+}
 
 // RunStore.
 

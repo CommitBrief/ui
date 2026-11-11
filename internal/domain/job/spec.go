@@ -92,6 +92,17 @@ func (s PRReviewSpec) Validate() error {
 	return nil
 }
 
+// ValidateFor checks the job's mode. A one-off pull request review is a preview
+// only: posting to GitHub needs the recorded, revocable consent of UI-0008, which
+// only a stored bot job carries (BotReviewRequestedSpec.PostConsentAt). Until a
+// screen records that consent for a single pull request, this kind never posts.
+func (PRReviewSpec) ValidateFor(mode Mode) error {
+	if mode == ModePost {
+		return newErr(CodeModeInvalid, "mode")
+	}
+	return nil
+}
+
 // Marshal renders the spec as the JSON a Job carries.
 func (s PRReviewSpec) Marshal() json.RawMessage {
 	b, _ := json.Marshal(s)

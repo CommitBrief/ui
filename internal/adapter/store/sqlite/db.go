@@ -157,6 +157,12 @@ func (s *Store) Jobs() port.JobStore { return jobStore{q: s.db, now: s.now} }
 // Runs is the run and task store on the shared pool.
 func (s *Store) Runs() port.RunStore { return runStore{q: s.db} }
 
+// Tracked is the tracked pull request store on the shared pool.
+func (s *Store) Tracked() port.TrackedPRStore { return trackedStore{q: s.db} }
+
+// Costs is the task cost meter on the shared pool.
+func (s *Store) Costs() port.CostMeter { return costMeter{q: s.db} }
+
 // InTx implements port.TxRunner.
 func (s *Store) InTx(ctx context.Context, fn func(port.Tx) error) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)

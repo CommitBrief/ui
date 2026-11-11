@@ -28,6 +28,9 @@ const (
 	KindReviewLocal Kind = "review.local"
 	// KindReviewPR reviews one pull request.
 	KindReviewPR Kind = "review.pr"
+	// KindBotReviewRequested reviews the pull requests whose review is
+	// requested from the signed-in GitHub user (UI-0005, UI-0008).
+	KindBotReviewRequested Kind = "bot.review_requested"
 )
 
 // maxKindLen bounds a kind name.
@@ -97,7 +100,8 @@ type Descriptor struct {
 
 var descriptors = []Descriptor{
 	{Kind: KindReviewLocal, Modes: []Mode{ModePreview}, Targets: TargetsOne},
-	{Kind: KindReviewPR, Modes: []Mode{ModePreview, ModePost}, Targets: TargetsOne},
+	{Kind: KindReviewPR, Modes: []Mode{ModePreview}, Targets: TargetsOne},
+	{Kind: KindBotReviewRequested, Modes: []Mode{ModePreview, ModePost}, Targets: TargetsMany},
 }
 
 // Descriptors returns every registered kind, in registration order.

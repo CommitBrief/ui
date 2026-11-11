@@ -49,8 +49,9 @@ func (e settingsTestEnv) LookupEnv(k string) (string, bool) { v, ok := e.vars[k]
 func (e settingsTestEnv) HomeDir() (string, error)          { return e.home, nil }
 
 type stubGitHub struct {
-	st  port.AuthStatus
-	err error
+	port.PRSource // only AuthStatus is used here
+	st            port.AuthStatus
+	err           error
 }
 
 func (s stubGitHub) AuthStatus(context.Context) (port.AuthStatus, error) { return s.st, s.err }

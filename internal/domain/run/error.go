@@ -31,6 +31,14 @@ const (
 	CodeLogUnavailable Code = "task_log_unavailable"
 	// CodeShuttingDown: the application is quitting and takes no new work.
 	CodeShuttingDown Code = "run_shutting_down"
+	// CodeScheduleInvalid: a time window of a job is not acceptable; the Field
+	// names the window and the part ("windows[0].days").
+	CodeScheduleInvalid Code = "schedule_invalid"
+	// CodeAutostartFailed: registering or removing the login item failed.
+	CodeAutostartFailed Code = "autostart_failed"
+	// CodeAutostartUnsupported: this operating system has no login item the UI
+	// can manage.
+	CodeAutostartUnsupported Code = "autostart_unsupported"
 	// CodeCanceled: the call was canceled by the frontend.
 	CodeCanceled Code = "canceled"
 	// CodeInternal: anything unexpected; details are in the log only.

@@ -235,8 +235,9 @@ func (t settingsTx) Jobs() port.JobStore          { return nil }
 func (t settingsTx) Runs() port.RunStore          { return nil }
 
 type fakeGitHub struct {
-	st  port.AuthStatus
-	err error
+	port.PRSource // only AuthStatus is used here
+	st            port.AuthStatus
+	err           error
 }
 
 func (f fakeGitHub) AuthStatus(context.Context) (port.AuthStatus, error) { return f.st, f.err }

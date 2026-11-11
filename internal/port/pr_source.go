@@ -2,7 +2,10 @@
 
 package port
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // GitHubHost is the only host the UI supports (UI-0005): repositories and pull
 // requests live on github.com.
@@ -45,11 +48,36 @@ type AuthStatus struct {
 	Problem string `json:"problem"`
 }
 
+// Pull request states as the tracked set and `gh pr view` report them.
+const (
+	PRStateOpen   = "open"
+	PRStateClosed = "closed"
+	PRStateMerged = "merged"
+)
+
+// PRRef is one pull request found by the review-requested search.
+type PRRef struct {
+	// Repo is "owner/name" of the base repository.
+	Repo    string
+	Number  int
+	IsDraft bool
+	// UpdatedAt is when GitHub last changed the pull request.
+	UpdatedAt time.Time
+	URL       string
+}
+
+// PRInfo is the current state of one pull request (`gh pr view`).
+type PRInfo struct {
+	// State is PRStateOpen, PRStateClosed or PRStateMerged.
+	State string
+	// HeadOID is the commit the pull request's head branch points at.
+	HeadOID string
+	IsDraft bool
+}
+
 // PRSource is what the UI needs from GitHub pull requests. The single
 // implementation is internal/adapter/github/gh (UI-0005 section 4), which is
-// the only place that runs `gh`. This phase has the authentication check;
-// discovery of review-requested pull requests (UI-0005 section 2) joins it in
-// phase 12.
+// the only place that runs `gh`.
 //
 // Every error an implementation returns is an *errcode.Error.
 type PRSource interface {
@@ -57,4 +85,11 @@ type PRSource interface {
 	// a missing login is a status, not an error; an error means the check
 	// itself failed (canceled, timed out, unreadable output).
 	AuthStatus(ctx context.Context) (AuthStatus, error)
+	// SearchReviewRequested finds the open pull requests, in the given
+	// repositories ("owner/name"), whose review is requested from the signed-in
+	// user: one combined query, not one per repository (UI-0005 section 2). A
+	// missing gh is gh_not_found, a missing login gh_not_authenticated.
+	SearchReviewRequested(ctx context.Context, repos []string) ([]PRRef, error)
+	// ViewPR reads the state and head commit of one pull request.
+	ViewPR(ctx context.Context, repo string, number int) (PRInfo, error)
 }

@@ -24,4 +24,31 @@ export enum Kind {
      * KindReviewPR reviews one pull request.
      */
     KindReviewPR = "review.pr",
+
+    /**
+     * KindBotReviewRequested reviews the pull requests whose review is
+     * requested from the signed-in GitHub user (UI-0005, UI-0008).
+     */
+    KindBotReviewRequested = "bot.review_requested",
+};
+
+/**
+ * Mode says whether a job only shows its result or also posts it to GitHub
+ * (UI-0008: preview is the default).
+ */
+export enum Mode {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * ModePreview runs the review and keeps the result in the UI.
+     */
+    ModePreview = "preview",
+
+    /**
+     * ModePost also publishes the review on the pull request.
+     */
+    ModePost = "post",
 };

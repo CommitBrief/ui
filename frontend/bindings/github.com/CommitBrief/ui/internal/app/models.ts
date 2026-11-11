@@ -6,10 +6,70 @@
 import * as errcode$0 from "../domain/errcode/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as job$0 from "../domain/job/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as run$0 from "../domain/run/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as schedule$0 from "../domain/schedule/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as settings$0 from "../domain/settings/models.js";
+
+/**
+ * BotJobInput is a bot job as the user edits it. ID 0 creates a job.
+ */
+export interface BotJobInput {
+    "id": number;
+    "name": string;
+    "mode": job$0.Mode;
+
+    /**
+     * Enabled lets the scheduler run the job.
+     */
+    "enabled": boolean;
+
+    /**
+     * Targets are the repositories the bot watches.
+     */
+    "targets": number[] | null;
+
+    /**
+     * IncludeDrafts also reviews draft pull requests.
+     */
+    "includeDrafts": boolean;
+
+    /**
+     * PostConsent is true when the user has just accepted the consent text of
+     * post mode (the review is written under their GitHub identity and removes
+     * them from the requested reviewers, UI-0008). A post job needs the consent
+     * recorded once; an existing job keeps its earlier consent.
+     */
+    "postConsent": boolean;
+    "windows": schedule$0.Window[] | null;
+}
+
+/**
+ * BudgetStatus is today's spend against the limit.
+ */
+export interface BudgetStatus {
+    /**
+     * LimitUSD is the daily budget; 0 means no limit.
+     */
+    "limitUsd": number;
+    "spentUsd": number;
+
+    /**
+     * Exceeded is true when there is a limit and the spend has reached it.
+     */
+    "exceeded": boolean;
+
+    /**
+     * DayStart is the local midnight the spend is counted from.
+     */
+    "dayStart": string;
+}
 
 /**
  * CLICapabilities are the features the installed CLI supports (UI-0003
@@ -256,6 +316,34 @@ export interface RunStatusEvent {
     "runId": number;
     "status": run$0.Status;
     "errorCode": errcode$0.Code;
+}
+
+/**
+ * ScheduledJob is a bot job with what the screen shows about its schedule.
+ */
+export interface ScheduledJob {
+    "id": number;
+    "name": string;
+    "mode": job$0.Mode;
+    "enabled": boolean;
+    "targets": number[] | null;
+    "includeDrafts": boolean;
+    "postConsentAt": string | null;
+    "windows": schedule$0.Window[] | null;
+
+    /**
+     * NextDue is the next slot of any window; null when there is none or the
+     * job is not scheduled (disabled, needs attention).
+     */
+    "nextDue": string | null;
+
+    /**
+     * AttentionCode is the failure class that stopped the job; empty when the
+     * job is fine. The job stays quiet until ResumeJob.
+     */
+    "attentionCode": errcode$0.Code;
+    "attentionAt": string | null;
+    "createdAt": string;
 }
 
 /**

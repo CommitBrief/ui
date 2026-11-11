@@ -157,10 +157,10 @@ func TestEngineCapabilitiesAndMinimumVersion(t *testing.T) {
 			if caps.Base != tc.base || caps.PostingInCLI != tc.inCLI {
 				t.Errorf("caps = %+v, want base=%v postingInCLI=%v", caps, tc.base, tc.inCLI)
 			}
-			// PostPR is not written until phase 12, so the UI must never be
-			// told it can post, whatever the CLI supports.
-			if caps.Posting {
-				t.Errorf("Posting = true while PostPR is not wired: %+v", caps)
+			// The UI side of posting is wired: a screen may offer Post exactly
+			// when the CLI ships the posting report and the verdict ceiling.
+			if caps.Posting != tc.inCLI {
+				t.Errorf("Posting = %v, want %v: %+v", caps.Posting, tc.inCLI, caps)
 			}
 			_, err = h.engine.ReviewLocal(context.Background(), localStaged(t))
 			if got := errcode.CodeOf(err); got != tc.wantErr {
@@ -173,16 +173,107 @@ func TestEngineCapabilitiesAndMinimumVersion(t *testing.T) {
 	}
 }
 
-func TestEnginePostPRIsNotWiredYet(t *testing.T) {
+// Posting needs a CLI that has the posting report and the verdict ceiling; an
+// older one (and a source build, which proves no version) answers
+// capability_missing before any process is started for the review.
+func TestEnginePostPRNeedsThePostingCapability(t *testing.T) {
+	for _, v := range []string{
+		"commitbrief 1.21.2 (commit a, built b)",
+		"commitbrief 1.22.0-rc.1 (commit a, built b)",
+		"commitbrief dev (commit none, built unknown)",
+	} {
+		h := newHarness(t, true)
+		h.set("FAKECLI_VERSION", v)
+		h.stdoutFromTestdata("remote_pr_report.golden.json")
+		_, err := h.engine.PostPR(context.Background(), port.PRRequest{Repo: "o/r", Number: 3})
+		if !errors.Is(err, errcode.ErrCapabilityMissing) {
+			t.Errorf("%s: err = %v, want capability_missing", v, err)
+		}
+		if _, statErr := os.Stat(h.argvLog); statErr == nil {
+			t.Errorf("%s: the review was started although the capability is missing", v)
+		}
+	}
+
 	h := newHarness(t, true)
 	h.set("FAKECLI_VERSION", "commitbrief 1.22.0 (commit a, built b)")
-	_, err := h.engine.PostPR(context.Background(), port.PRRequest{Repo: "o/r", Number: 3})
-	if !errors.Is(err, errcode.ErrCapabilityMissing) {
-		t.Fatalf("err = %v, want capability_missing", err)
-	}
 	if _, err := h.engine.PostPR(context.Background(), port.PRRequest{Repo: "bad", Number: 3}); errcode.Is(err, errcode.CapabilityMissing) {
 		t.Error("an invalid request should be refused before the capability answer")
 	}
+}
+
+func TestEnginePostPRRunsThePostingMode(t *testing.T) {
+	h := newHarness(t, true)
+	h.set("FAKECLI_VERSION", "commitbrief 1.22.0 (commit a, built b)")
+	h.stdoutFromTestdata("remote_pr_report.golden.json")
+	clone := repoDir(t)
+
+	rep, err := h.engine.PostPR(context.Background(), port.PRRequest{
+		Repo: "CommitBrief/web", Number: 42, LocalPath: clone, Options: port.RunOptions{Unattended: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Remote == nil || rep.Remote.Status != review.RemoteSubmitted || rep.Remote.HeadOID != "stable" || rep.Remote.Verdict != review.VerdictComment {
+		t.Errorf("remote = %+v", rep.Remote)
+	}
+	rec := h.lastCall()
+	if contains(rec.Args, "--no-post") {
+		t.Errorf("posting mode must not carry --no-post: %v", rec.Args)
+	}
+	for _, want := range []string{"--json", "--since-last-review", "--no-cost-check"} {
+		if !contains(rec.Args, want) {
+			t.Errorf("argv %v lacks %s", rec.Args, want)
+		}
+	}
+	sameDir(t, rec.Cwd, clone)
+}
+
+func TestEnginePostPRFailureShapes(t *testing.T) {
+	ctx := context.Background()
+	req := port.PRRequest{Repo: "o/r", Number: 3, Options: port.RunOptions{Unattended: true}}
+	const v = "commitbrief 1.22.0 (commit a, built b)"
+
+	t.Run("gh missing is refused before the review", func(t *testing.T) {
+		h := newHarness(t, false)
+		h.set("FAKECLI_VERSION", v)
+		if _, err := h.engine.PostPR(ctx, req); !errcode.Is(err, errcode.GHNotFound) {
+			t.Errorf("err = %v", err)
+		}
+		if _, statErr := os.Stat(h.argvLog); statErr == nil {
+			t.Error("the CLI ran without gh")
+		}
+	})
+
+	t.Run("a successful run without the remote container is not accepted", func(t *testing.T) {
+		h := newHarness(t, true)
+		h.set("FAKECLI_VERSION", v)
+		h.stdoutFromTestdata("v1_findings.golden")
+		if _, err := h.engine.PostPR(ctx, req); !errcode.Is(err, errcode.Unknown) {
+			t.Errorf("err = %v", err)
+		}
+	})
+
+	t.Run("too_volatile keeps its class", func(t *testing.T) {
+		h := newHarness(t, true)
+		h.set("FAKECLI_VERSION", v, "FAKECLI_EXIT", "1")
+		h.stdoutLiteral(strings.Replace(string(readTestdata(t, "remote_pr_report.golden.json")), `"status": "submitted"`, `"status": "too_volatile"`, 1))
+		if _, err := h.engine.PostPR(ctx, req); !errcode.Is(err, errcode.TooVolatile) {
+			t.Errorf("err = %v", err)
+		}
+	})
+
+	t.Run("self pr and plain-text providers keep their class", func(t *testing.T) {
+		for stderr, want := range map[string]errcode.Code{
+			"Error: you are the author of this PR":              errcode.SelfPR,
+			"Error: provider can't produce structured findings": errcode.ProviderNotAPI,
+		} {
+			h := newHarness(t, true)
+			h.set("FAKECLI_VERSION", v, "FAKECLI_EXIT", "1", "FAKECLI_STDERR", stderr)
+			if _, err := h.engine.PostPR(ctx, req); !errcode.Is(err, want) {
+				t.Errorf("%q: err = %v, want %s", stderr, err, want)
+			}
+		}
+	})
 }
 
 func TestEngineRelocatesWhenTheOverrideChanges(t *testing.T) {

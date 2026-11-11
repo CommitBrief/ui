@@ -37,11 +37,6 @@ const (
 	backstopSlack = 30 * time.Second
 )
 
-// postingWired is false until phase 12 writes PostPR. Capabilities.Posting
-// stays false meanwhile, so no screen offers an action that would only answer
-// capability_missing. Phase 12 flips it.
-const postingWired = false
-
 // Config wires an Engine.
 type Config struct {
 	// Env is the process environment; nil means the real one.
@@ -240,7 +235,7 @@ func (e *Engine) Capabilities(ctx context.Context) (port.Capabilities, error) {
 		Base:           Satisfies(loc.ver, CapBase),
 		ConfigSetStdin: Satisfies(loc.ver, CapConfigSetStdin),
 		PostingInCLI:   inCLI,
-		Posting:        postingWired && inCLI,
+		Posting:        inCLI,
 	}, nil
 }
 
@@ -410,18 +405,51 @@ func (e *Engine) PreviewPR(ctx context.Context, req port.PRRequest) (review.Repo
 	return reportFrom(res, c)
 }
 
-// PostPR implements port.ReviewEngine. The signature is final; the body arrives
-// with phase 12, which needs CLI ADR-0048 (released as v1.22.0) for the posting
-// report and the verdict ceiling. Until then it reports the missing capability.
-func (e *Engine) PostPR(_ context.Context, req port.PRRequest) (port.PostResult, error) {
-	if err := validateRepo(req.Repo); err != nil {
+// PostPR implements port.ReviewEngine: `commitbrief remote pr N --repo o/r
+// --json --since-last-review --max-verdict comment`. It writes to GitHub: the
+// review comments and one verdict, under the identity gh is logged in with. The
+// verdict ceiling is always "comment" (UI-0008 section 3), so the UI never
+// submits an approval. The CLI prints the machine-readable posting report (CLI
+// ADR-0048) that the result carries in Remote; a CLI that predates it answers
+// capability_missing before anything is started.
+func (e *Engine) PostPR(ctx context.Context, req port.PRRequest) (port.PostResult, error) {
+	timeout := e.timeoutFor(req.Options, e.cfg.DefaultTimeout)
+	args, err := postPRArgs(req, timeout)
+	if err != nil {
 		return port.PostResult{}, err
 	}
-	if err := validatePRNumber(req.Number); err != nil {
+	dir := req.LocalPath
+	if dir != "" {
+		if err := validateLocalPath(dir); err != nil {
+			return port.PostResult{}, err
+		}
+	} else if dir, err = e.ensureDataDir(); err != nil {
 		return port.PostResult{}, err
 	}
-	return port.PostResult{}, errcode.New(errcode.CapabilityMissing,
-		"posting reviews is not available yet (needs commitbrief "+MinVersion(CapPosting)+" or later and phase 12)")
+	loc, err := e.requireBase(ctx)
+	if err != nil {
+		return port.PostResult{}, err
+	}
+	if !Satisfies(loc.ver, CapPosting) {
+		return port.PostResult{}, errcode.New(errcode.CapabilityMissing,
+			fmt.Sprintf("posting reviews needs commitbrief %s or later, found %s", MinVersion(CapPosting), loc.ver))
+	}
+	if _, ok := loc.disc.FindTool("gh"); !ok {
+		return port.PostResult{}, errcode.New(errcode.GHNotFound, "the gh CLI was not found on the discovered PATH")
+	}
+	c := call{op: opReview, args: args, dir: dir, cliMax: timeout, onLine: req.Options.OnProgress}
+	res, err := e.run(ctx, loc, c)
+	if err != nil {
+		return port.PostResult{}, err
+	}
+	rep, err := reportFrom(res, c)
+	if err == nil && rep.Remote == nil {
+		// A posting run that exits 0 always carries the remote container; a
+		// document without it is not what this CLI promised.
+		return port.PostResult{}, errcode.New(errcode.Unknown, "the CLI printed no posting report").
+			WithDetail(tailString(res.StderrTail, 2048))
+	}
+	return rep, err
 }
 
 func (e *Engine) ensureDataDir() (string, error) {

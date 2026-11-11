@@ -8,6 +8,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/CommitBrief/ui/internal/domain/errcode"
 	"github.com/CommitBrief/ui/internal/port"
 )
 
@@ -39,5 +40,32 @@ func TestIntegrationAuthStatusWithNoLogin(t *testing.T) {
 	}
 	if st.Authenticated || st.Problem != port.AuthProblemNotLoggedIn {
 		t.Errorf("status = %+v, want not logged in", st)
+	}
+}
+
+// With no login, the real gh refuses a search and a view, and the adapter files
+// both under gh_not_authenticated (the bot's "needs attention" state), not under
+// an unknown failure. gh gets an empty config directory and no token variables.
+func TestIntegrationDiscoveryWithNoLogin(t *testing.T) {
+	home := t.TempDir()
+	env := testEnv{
+		vars: map[string]string{
+			"HOME": home, "USERPROFILE": home, "GH_CONFIG_DIR": home,
+			"GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_HOST": "",
+		},
+		home: home,
+	}
+	c := New(Config{Env: env, Probe: func(context.Context) (string, error) { return "", nil }})
+	if st, err := c.AuthStatus(context.Background()); err != nil || !st.Installed {
+		t.Skip("no gh on this machine")
+	}
+
+	_, err := c.SearchReviewRequested(context.Background(), []string{"cli/cli"})
+	if !errcode.Is(err, errcode.GHNotAuthenticated) {
+		t.Errorf("SearchReviewRequested = %v, want gh_not_authenticated", err)
+	}
+	_, err = c.ViewPR(context.Background(), "cli/cli", 1)
+	if !errcode.Is(err, errcode.GHNotAuthenticated) {
+		t.Errorf("ViewPR = %v, want gh_not_authenticated", err)
 	}
 }

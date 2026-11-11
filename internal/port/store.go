@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/CommitBrief/ui/internal/domain/repo"
+	"github.com/CommitBrief/ui/internal/domain/schedule"
 )
 
 // Store errors. Adapters return these (possibly wrapped); the application
@@ -130,6 +131,14 @@ type JobRecord struct {
 	CreatedAt time.Time
 	// RepositoryIDs are the job's targets (table job_targets).
 	RepositoryIDs []int64
+	// Windows are the job's time windows (table schedules); none means the job
+	// only runs when the user starts it.
+	Windows []schedule.Window
+	// AttentionCode is the failure class that stopped the scheduler from
+	// running the job ("gh_not_authenticated", ...); empty when the job is
+	// fine. AttentionAt is when it was recorded.
+	AttentionCode string
+	AttentionAt   *time.Time
 }
 
 // JobStore persists job definitions and their repository targets.
@@ -142,9 +151,16 @@ type JobStore interface {
 	GetJob(ctx context.Context, id int64) (JobRecord, error)
 	// ListJobs returns every job, oldest first, with its targets.
 	ListJobs(ctx context.Context) ([]JobRecord, error)
-	// UpdateJob replaces name, spec, mode, enabled and targets of the row with
-	// j.ID (the kind never changes). ErrNotFound when it does not exist.
+	// UpdateJob replaces name, spec, mode, enabled, targets and windows of the
+	// row with j.ID (the kind never changes); the attention state is not
+	// touched (see SetAttention). ErrNotFound when it does not exist.
 	UpdateJob(ctx context.Context, j JobRecord) error
+	// SetAttention records that the job needs the user's attention and must not
+	// be scheduled until ClearAttention. ErrNotFound when it does not exist.
+	SetAttention(ctx context.Context, id int64, code string, at time.Time) error
+	// ClearAttention lets the scheduler run the job again. Clearing a job that
+	// has none is not an error; ErrNotFound when the job does not exist.
+	ClearAttention(ctx context.Context, id int64) error
 	// DeleteJob removes the job and its targets; its runs stay with the job
 	// reference cleared. ErrNotFound when it does not exist.
 	DeleteJob(ctx context.Context, id int64) error
@@ -238,4 +254,45 @@ type RunStore interface {
 	ExpiredLogs(ctx context.Context, before time.Time, keepNewest int) ([]TaskLogRef, error)
 	// ClearLog forgets the log path of a task whose file was removed.
 	ClearLog(ctx context.Context, taskID int64) error
+}
+
+// TrackedPR is a pull request the bot keeps following until it is closed or
+// merged (table tracked_prs, UI-0005 section 3). GitHub drops the user from the
+// requested reviewers once a review is submitted, so the review-requested
+// search stops returning a pull request after the first review; the tracked set
+// is what keeps later pushes visible.
+type TrackedPR struct {
+	RepositoryID int64
+	Number       int
+	FirstSeenAt  time.Time
+	// LastHeadOID is the head commit of the last successful review by the job and
+	// mode ListOpen was asked about; empty until there is one. A pull request
+	// whose head still equals it needs no task of that job.
+	LastHeadOID string
+	LastRunAt   *time.Time
+	// State is PRStateOpen, PRStateClosed or PRStateMerged.
+	State string
+	// Source says how it entered the set ("review_requested").
+	Source string
+}
+
+// TrackedPRStore persists the tracked pull requests. It is not part of Tx: the
+// bot writes single rows.
+type TrackedPRStore interface {
+	// Track adds the pull request as open, or marks an existing row open again
+	// (a closed pull request can be reopened). The last reviewed head and the
+	// first-seen time of an existing row are kept. ErrNotFound when the
+	// repository does not exist.
+	Track(ctx context.Context, repositoryID int64, number int, source string, at time.Time) error
+	// ListOpen returns the open tracked pull requests of the repositories, each
+	// with what the job reviewed last in that mode (mode is "preview" or "post").
+	// The tracked set is shared, the reviewed head is not: a post job never skips
+	// a head only a preview job looked at.
+	ListOpen(ctx context.Context, jobID int64, mode string, repositoryIDs []int64) ([]TrackedPR, error)
+	// SetState records that the pull request is open, closed or merged.
+	SetState(ctx context.Context, repositoryID int64, number int, state string) error
+	// MarkReviewed records, for the job and mode, the head commit of a successful
+	// review and when it ran. ErrNotFound when the pull request is not tracked or
+	// the job does not exist. The records go with the job when it is deleted.
+	MarkReviewed(ctx context.Context, jobID int64, mode string, repositoryID int64, number int, headOID string, at time.Time) error
 }

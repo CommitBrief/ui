@@ -4,10 +4,12 @@
 import * as HealthService from "./healthservice.js";
 import * as JobsService from "./jobsservice.js";
 import * as ReposService from "./reposservice.js";
+import * as SchedulesService from "./schedulesservice.js";
 import * as SettingsService from "./settingsservice.js";
 export {
     HealthService,
     JobsService,
     ReposService,
+    SchedulesService,
     SettingsService
 };
