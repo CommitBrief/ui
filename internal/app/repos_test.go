@@ -531,7 +531,7 @@ func TestNetworkLocalPathsNeverReachTheFileSystem(t *testing.T) {
 	want := repo.CodeLocalPathInvalid
 	if runtime.GOOS == "windows" {
 		want = repo.CodeLocalPathNetwork
-		paths = append(paths, `//attacker/share/repo`, `\?\C:\Users\me`)
+		paths = append(paths, `//attacker/share/repo`, `\\?\C:\Users\me`)
 	}
 
 	for _, p := range paths {
