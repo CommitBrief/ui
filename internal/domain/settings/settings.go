@@ -179,6 +179,10 @@ func ValidateCLIPath(p string) error { return ValidateCLIPathFor(runtime.GOOS, p
 // ValidateCLIPathFor is ValidateCLIPath with the operating system as a
 // parameter, so the Windows rules can be tested on any machine. The
 // platform-specific cleanliness check runs only when goos is the running OS.
+// On Windows a drive path may use forward slashes (c:/opt/x.exe is accepted by
+// fspath), but filepath.Clean rewrites them to backslashes; the path is
+// compared with its backslash form so that only real redundancy (doubled
+// separators, dot segments) counts as unclean.
 func ValidateCLIPathFor(goos, p string) error {
 	if p == "" {
 		return nil
@@ -186,7 +190,7 @@ func ValidateCLIPathFor(goos, p string) error {
 	if len(p) > MaxCLIPathLen || fspath.ValidateLocalFor(goos, p) != nil {
 		return New(CodeValueInvalid, "cliPath")
 	}
-	if goos == runtime.GOOS && (!filepath.IsAbs(p) || filepath.Clean(p) != p) {
+	if goos == runtime.GOOS && (!filepath.IsAbs(p) || filepath.Clean(p) != filepath.FromSlash(p)) {
 		return New(CodeValueInvalid, "cliPath")
 	}
 	return nil
