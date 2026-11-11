@@ -53,8 +53,9 @@ type ImportResult struct {
 	// Skipped counts entries that were already in the list (or repeated in
 	// the file); existing rows are never overwritten.
 	Skipped int `json:"skipped"`
-	// PathsDropped counts created repositories whose local path is not a git
-	// checkout on this machine and was therefore not kept.
+	// PathsDropped counts created repositories whose local path was not kept:
+	// it is not a git checkout on this machine, or it is a network or device
+	// path (never probed).
 	PathsDropped int `json:"pathsDropped"`
 }
 
@@ -86,12 +87,17 @@ func (s *Repos) Get(ctx context.Context, id int64) (repo.Repository, error) {
 // must be an absolute path to the root of a git work tree.
 func (s *Repos) Add(ctx context.Context, in RepoInput) (repo.Repository, error) {
 	r := repo.Repository{
-		Owner:     strings.TrimSpace(in.Owner),
-		Name:      strings.TrimSpace(in.Name),
-		LocalPath: repo.NormalizeLocalPath(strings.TrimSpace(in.LocalPath)),
-		Enabled:   true,
+		Owner:   strings.TrimSpace(in.Owner),
+		Name:    strings.TrimSpace(in.Name),
+		Enabled: true,
 	}
 	if err := r.Validate(); err != nil {
+		return repo.Repository{}, err
+	}
+	// The path is screened (network and device paths refused) by string
+	// inspection before the inspector, which touches the file system, sees it.
+	var err error
+	if r.LocalPath, err = repo.CleanLocalPath(in.LocalPath); err != nil {
 		return repo.Repository{}, err
 	}
 	if r.LocalPath != "" {
@@ -116,8 +122,12 @@ func (s *Repos) Update(ctx context.Context, id int64, in RepoInput) (repo.Reposi
 	next := cur
 	next.Owner = strings.TrimSpace(in.Owner)
 	next.Name = strings.TrimSpace(in.Name)
-	next.LocalPath = repo.NormalizeLocalPath(strings.TrimSpace(in.LocalPath))
 	if err := next.Validate(); err != nil {
+		return repo.Repository{}, err
+	}
+	// Screened even when it equals the stored path: nothing from outside is
+	// trusted to reach the file system without the string check.
+	if next.LocalPath, err = repo.CleanLocalPath(in.LocalPath); err != nil {
 		return repo.Repository{}, err
 	}
 	if next.LocalPath != "" && next.LocalPath != cur.LocalPath {
@@ -152,9 +162,12 @@ func (s *Repos) Delete(ctx context.Context, id int64) error {
 // SuggestFromLocalPath reads the origin remote of the checkout at path and
 // proposes owner/name for the form.
 func (s *Repos) SuggestFromLocalPath(ctx context.Context, path string) (RemoteSuggestion, error) {
-	path = repo.NormalizeLocalPath(strings.TrimSpace(path))
-	if err := repo.ValidateLocalPath(path); err != nil {
+	path, err := repo.CleanLocalPath(path)
+	if err != nil {
 		return RemoteSuggestion{}, err
+	}
+	if path == "" {
+		return RemoteSuggestion{}, &repo.Error{Code: repo.CodeLocalPathInvalid, Field: "localPath"}
 	}
 	ref, err := s.inspect.Origin(ctx, path)
 	if err != nil {
@@ -242,10 +255,9 @@ func (s *Repos) ImportJSON(ctx context.Context, data string) (ImportResult, erro
 	cands := make([]candidate, 0, len(f.Repositories))
 	for i, e := range f.Repositories {
 		r := repo.Repository{
-			Owner:     strings.TrimSpace(e.Owner),
-			Name:      strings.TrimSpace(e.Name),
-			LocalPath: repo.NormalizeLocalPath(strings.TrimSpace(e.LocalPath)),
-			Enabled:   e.Enabled == nil || *e.Enabled,
+			Owner:   strings.TrimSpace(e.Owner),
+			Name:    strings.TrimSpace(e.Name),
+			Enabled: e.Enabled == nil || *e.Enabled,
 		}
 		if err := repo.ValidateOwner(r.Owner); err != nil {
 			return ImportResult{}, atEntry(err, i+1)
@@ -254,14 +266,24 @@ func (s *Repos) ImportJSON(ctx context.Context, data string) (ImportResult, erro
 			return ImportResult{}, atEntry(err, i+1)
 		}
 		c := candidate{r: r}
-		if r.LocalPath != "" {
-			if err := repo.ValidateLocalPath(r.LocalPath); err != nil {
-				c.r.LocalPath, c.dropped = "", true
-			} else if err := s.inspect.CheckRoot(ctx, r.LocalPath); err != nil {
-				if ctxErr := ctx.Err(); ctxErr != nil {
-					return ImportResult{}, ctxErr
+		if strings.TrimSpace(e.LocalPath) != "" {
+			// An import file comes from outside: a network or device path in
+			// it (a UNC path would make Windows authenticate to that host the
+			// moment it is touched) is refused by string inspection and
+			// dropped, never handed to the inspector.
+			lp, err := repo.CleanLocalPath(e.LocalPath)
+			switch {
+			case err != nil:
+				c.dropped = true
+			default:
+				if err := s.inspect.CheckRoot(ctx, lp); err != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return ImportResult{}, ctxErr
+					}
+					c.dropped = true
+				} else {
+					c.r.LocalPath = lp
 				}
-				c.r.LocalPath, c.dropped = "", true
 			}
 		}
 		cands = append(cands, c)

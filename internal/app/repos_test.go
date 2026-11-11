@@ -6,7 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -154,16 +157,29 @@ func (f *fakeInspector) Origin(ctx context.Context, path string) (port.RemoteRef
 	return ref, nil
 }
 
-const (
-	pathUI  = "/work/ui"
-	pathCLI = "/work/cli"
+// workRoot is an absolute directory on the running OS. The fake inspector
+// never touches the file system, but the path rules in the domain use
+// filepath.IsAbs, and "/work/ui" is not absolute on Windows (no drive letter).
+var workRoot = func() string {
+	if runtime.GOOS == "windows" {
+		return `C:\work`
+	}
+	return "/work"
+}()
+
+var (
+	pathUI       = filepath.Join(workRoot, "ui")
+	pathCLI      = filepath.Join(workRoot, "cli")
+	pathNoRemote = filepath.Join(workRoot, "noremote")
+	pathMissing  = filepath.Join(workRoot, "does", "not", "exist")
+	pathGone     = filepath.Join(workRoot, "gone")
 )
 
 func newService(t *testing.T) (*Repos, *memStore, *fakeInspector) {
 	t.Helper()
 	st := newMemStore()
 	in := &fakeInspector{
-		checkouts: map[string]string{pathUI: "x", pathCLI: "x", "/work/noremote": "x"},
+		checkouts: map[string]string{pathUI: "x", pathCLI: "x", pathNoRemote: "x"},
 		origins: map[string]port.RemoteRef{
 			pathUI:  {Host: "github.com", Owner: "CommitBrief", Name: "ui"},
 			pathCLI: {Host: "github.com", Owner: "CommitBrief", Name: "commitbrief"},
@@ -187,7 +203,7 @@ func TestAddValidatesAndStores(t *testing.T) {
 	ctx := context.Background()
 	s, st, in := newService(t)
 
-	r, err := s.Add(ctx, RepoInput{Owner: " CommitBrief ", Name: "ui", LocalPath: pathUI + "/"})
+	r, err := s.Add(ctx, RepoInput{Owner: " CommitBrief ", Name: "ui", LocalPath: pathUI + string(filepath.Separator)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +231,7 @@ func TestAddValidatesAndStores(t *testing.T) {
 		{RepoInput{Owner: "a/b", Name: "x"}, repo.CodeOwnerInvalid},
 		{RepoInput{Owner: "a", Name: "x y"}, repo.CodeNameInvalid},
 		{RepoInput{Owner: "a", Name: "x", LocalPath: "relative"}, repo.CodeLocalPathInvalid},
-		{RepoInput{Owner: "a", Name: "x", LocalPath: "/does/not/exist"}, repo.CodeLocalPathMissing},
+		{RepoInput{Owner: "a", Name: "x", LocalPath: pathMissing}, repo.CodeLocalPathMissing},
 	}
 	for _, tc := range bad {
 		before := len(st.rows)
@@ -261,7 +277,7 @@ func TestUpdateSetEnabledDeleteGet(t *testing.T) {
 	if len(in.checked) != 1 {
 		t.Errorf("a changed path must be checked once, got %v", in.checked)
 	}
-	_, err = s.Update(ctx, a.ID, RepoInput{Owner: "o", Name: "renamed", LocalPath: "/gone"})
+	_, err = s.Update(ctx, a.ID, RepoInput{Owner: "o", Name: "renamed", LocalPath: pathGone})
 	wantCode(t, err, repo.CodeLocalPathMissing)
 
 	_, err = s.Update(ctx, a.ID, RepoInput{Owner: "o", Name: "B"})
@@ -310,9 +326,9 @@ func TestSuggestFromLocalPath(t *testing.T) {
 		t.Errorf("AlreadyAdded = false for a repository in the list: %+v", got)
 	}
 
-	_, err = s.SuggestFromLocalPath(ctx, "/work/noremote")
+	_, err = s.SuggestFromLocalPath(ctx, pathNoRemote)
 	wantCode(t, err, repo.CodeNoRemote)
-	_, err = s.SuggestFromLocalPath(ctx, "/nowhere")
+	_, err = s.SuggestFromLocalPath(ctx, pathMissing)
 	wantCode(t, err, repo.CodeLocalPathMissing)
 	_, err = s.SuggestFromLocalPath(ctx, "relative")
 	wantCode(t, err, repo.CodeLocalPathInvalid)
@@ -494,5 +510,85 @@ func TestUpdateKeepsEnabledSetMeanwhile(t *testing.T) {
 	}
 	if st.rows[r.ID].Name != "b" || !st.rows[r.ID].Enabled {
 		t.Errorf("stored row = %+v", st.rows[r.ID])
+	}
+}
+
+// A network or device path must be refused by string inspection before the
+// inspector -- the only thing that touches the file system -- sees it, in every
+// entry point. On Windows, stat-ing such a path makes the machine authenticate
+// (NTLM) to the named host. The allowlist (fspath) accepts only X:\... drive
+// paths there; on Unix the same strings are plain relative names and are
+// refused as "not absolute".
+func TestNetworkLocalPathsNeverReachTheFileSystem(t *testing.T) {
+	ctx := context.Background()
+	paths := []string{
+		`\\attacker\share\repo`,
+		`\\?\UNC\attacker\share\repo`,
+		`\\.\pipe\x`,
+		`\??\UNC\attacker\share\repo`, // NT namespace
+		`  \\attacker\share  `,
+	}
+	want := repo.CodeLocalPathInvalid
+	if runtime.GOOS == "windows" {
+		want = repo.CodeLocalPathNetwork
+		paths = append(paths, `//attacker/share/repo`, `\?\C:\Users\me`)
+	}
+
+	for _, p := range paths {
+		s, st, in := newService(t)
+		existing, err := s.Add(ctx, RepoInput{Owner: "o", Name: "existing", LocalPath: pathUI})
+		if err != nil {
+			t.Fatal(err)
+		}
+		in.checked = nil // only calls made from here on count
+		rowsBefore := len(st.rows)
+
+		_, err = s.Add(ctx, RepoInput{Owner: "o", Name: "n", LocalPath: p})
+		wantCode(t, err, want)
+
+		_, err = s.Update(ctx, existing.ID, RepoInput{Owner: "o", Name: "existing", LocalPath: p})
+		wantCode(t, err, want)
+		if st.rows[existing.ID].LocalPath != pathUI {
+			t.Errorf("Update(%q) changed the stored path", p)
+		}
+
+		_, err = s.SuggestFromLocalPath(ctx, p)
+		wantCode(t, err, want)
+
+		if len(st.rows) != rowsBefore {
+			t.Errorf("a rejected Add(%q) stored a row", p)
+		}
+		if len(in.checked) != 0 {
+			t.Errorf("%q reached the file system inspector: %v", p, in.checked)
+		}
+	}
+}
+
+// In an import file the refused path is dropped (the repository is still
+// imported) without the inspector ever being asked about it.
+func TestImportDropsNetworkPathsWithoutProbingThem(t *testing.T) {
+	ctx := context.Background()
+	s, st, in := newService(t)
+	data := `{"schema":"` + ExportSchema + `","version":1,"repositories":[
+		{"owner":"a","name":"unc","localPath":"\\\\attacker\\share\\repo"},
+		{"owner":"a","name":"extended","localPath":"\\\\?\\UNC\\attacker\\share\\repo"},
+		{"owner":"a","name":"device","localPath":"\\\\.\\pipe\\x"},
+		{"owner":"a","name":"nt","localPath":"\\??\\UNC\\attacker\\share\\repo"},
+		{"owner":"a","name":"local","localPath":` + strconv.Quote(pathUI) + `}
+	]}`
+	res, err := s.ImportJSON(ctx, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res != (ImportResult{Created: 5, PathsDropped: 4}) {
+		t.Errorf("result = %+v, want 5 created and 4 paths dropped", res)
+	}
+	if len(in.checked) != 1 || in.checked[0] != pathUI {
+		t.Errorf("the inspector was asked about %v; only the local path may reach it", in.checked)
+	}
+	for _, r := range st.rows {
+		if r.Name != "local" && r.LocalPath != "" {
+			t.Errorf("%s kept a refused path: %q", r.Name, r.LocalPath)
+		}
 	}
 }

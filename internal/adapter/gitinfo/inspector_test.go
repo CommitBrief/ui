@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/CommitBrief/ui/internal/domain/repo"
@@ -188,4 +189,71 @@ func TestLinkedWorktreeAndSubmodule(t *testing.T) {
 	dangling := t.TempDir()
 	writeFile(t, filepath.Join(dangling, ".git"), "gitdir: "+filepath.Join(dangling, "nowhere")+"\n")
 	wantCode(t, in.CheckRoot(ctx, dangling), repo.CodeLocalPathNotGit)
+}
+
+// A network or device path must be refused by string inspection before the file
+// system is touched: on Windows even stat-ing a UNC path makes the machine
+// authenticate (NTLM) to the named host. The hosts below do not exist, so a
+// refusal code (rather than "missing" / "not a repository") proves the string
+// check ran first. Windows accepts only X:\... drive paths and reports the rest
+// as network paths; on Unix the backslash spellings are plain relative names.
+func TestNetworkPathsAreRefusedBeforeTheFileSystemIsTouched(t *testing.T) {
+	ctx := context.Background()
+	in := New()
+
+	paths := []string{
+		`\\attacker\share\repo`,
+		`\\?\UNC\attacker\share\repo`,
+		`\\.\pipe\x`,
+		`\??\UNC\attacker\share\repo`,
+	}
+	want := repo.CodeLocalPathInvalid
+	if runtime.GOOS == "windows" {
+		want = repo.CodeLocalPathNetwork
+		paths = append(paths, `//attacker/share/repo`, `\\?\C:\Users\me`)
+	}
+	for _, p := range paths {
+		wantCode(t, in.CheckRoot(ctx, p), want)
+		_, err := in.Origin(ctx, p)
+		wantCode(t, err, want)
+	}
+}
+
+// asWindowsLinks makes the strings found inside a checkout (link targets,
+// "gitdir:" and "commondir" values) follow the Windows rules for the duration
+// of a test, so that the refusal of network targets is exercised on every OS.
+func asWindowsLinks(t *testing.T) {
+	t.Helper()
+	old := linkTargetOS
+	linkTargetOS = "windows"
+	t.Cleanup(func() { linkTargetOS = old })
+}
+
+// The contents of a checkout are attacker controlled too: a ".git" pointer file
+// or a "commondir" file that names a network location must not be followed.
+func TestNetworkPointersInsideACheckoutAreRefused(t *testing.T) {
+	asWindowsLinks(t)
+	ctx := context.Background()
+	in := New()
+
+	for _, target := range []string{
+		`\\attacker\share\gitdir`,
+		`//attacker/share/gitdir`,
+		`\\?\UNC\attacker\share\gitdir`,
+		`\\.\pipe\gitdir`,
+		`\??\UNC\attacker\share\gitdir`,
+	} {
+		root := t.TempDir()
+		writeFile(t, filepath.Join(root, ".git"), "gitdir: "+target+"\n")
+		wantCode(t, in.CheckRoot(ctx, root), repo.CodeLocalPathNetwork)
+		_, err := in.Origin(ctx, root)
+		wantCode(t, err, repo.CodeLocalPathNetwork)
+
+		// commondir of an otherwise ordinary checkout.
+		plain := newCheckout(t, "[remote \"origin\"]\n\turl = git@github.com:a/b.git\n")
+		writeFile(t, filepath.Join(plain, ".git", "commondir"), target+"\n")
+		wantCode(t, in.CheckRoot(ctx, plain), repo.CodeLocalPathNetwork)
+		_, err = in.Origin(ctx, plain)
+		wantCode(t, err, repo.CodeLocalPathNetwork)
+	}
 }

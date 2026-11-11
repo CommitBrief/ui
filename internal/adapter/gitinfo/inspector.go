@@ -46,6 +46,10 @@ func (Inspector) Origin(ctx context.Context, path string) (port.RemoteRef, error
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return port.RemoteRef{}, ctxErr
 		}
+		var re *repo.Error
+		if errors.As(err, &re) && re.Code == repo.CodeLocalPathNetwork {
+			return port.RemoteRef{}, err
+		}
 		if errors.Is(err, os.ErrNotExist) {
 			return port.RemoteRef{}, repo.New(repo.CodeNoRemote)
 		}
@@ -69,6 +73,13 @@ type gitDirs struct {
 // locate validates path and finds its git directories. A plain checkout has a
 // ".git" directory; a linked worktree or submodule has a ".git" file that
 // points at the real git directory.
+//
+// Nothing that could come from outside reaches the file system unscreened: the
+// path itself is checked as a string first, and every path derived from the
+// checkout's own contents (the ".git" entry, a "gitdir:" or "commondir" line,
+// symbolic links anywhere along the way) goes through resolveLocal, which
+// refuses network and device paths (a UNC path makes Windows authenticate to
+// its host the moment it is touched).
 func locate(ctx context.Context, path string) (gitDirs, error) {
 	if err := ctx.Err(); err != nil {
 		return gitDirs{}, err
@@ -79,7 +90,11 @@ func locate(ctx context.Context, path string) (gitDirs, error) {
 	if err := repo.ValidateLocalPath(path); err != nil {
 		return gitDirs{}, err
 	}
-	fi, err := os.Stat(path)
+	root, err := resolveLocal(path)
+	if err != nil {
+		return gitDirs{}, fromResolve(err, repo.CodeLocalPathMissing)
+	}
+	fi, err := os.Stat(root)
 	if err != nil {
 		return gitDirs{}, &repo.Error{Code: repo.CodeLocalPathMissing, Field: "localPath", Err: err}
 	}
@@ -90,7 +105,10 @@ func locate(ctx context.Context, path string) (gitDirs, error) {
 	notGit := func(cause error) error {
 		return &repo.Error{Code: repo.CodeLocalPathNotGit, Field: "localPath", Err: cause}
 	}
-	dotGit := filepath.Join(path, ".git")
+	dotGit, err := resolveLocal(filepath.Join(root, ".git"))
+	if err != nil {
+		return gitDirs{}, fromResolve(err, repo.CodeLocalPathNotGit)
+	}
 	gi, err := os.Stat(dotGit)
 	if err != nil {
 		return gitDirs{}, notGit(err)
@@ -99,33 +117,90 @@ func locate(ctx context.Context, path string) (gitDirs, error) {
 	if !gi.IsDir() {
 		data, err := readLimited(ctx, dotGit, maxPointerBytes)
 		if err != nil {
-			return gitDirs{}, notGit(err)
+			return gitDirs{}, fromResolve(err, repo.CodeLocalPathNotGit)
 		}
 		target, ok := strings.CutPrefix(firstLine(string(data)), "gitdir:")
 		target = strings.TrimSpace(target)
 		if !ok || target == "" {
 			return gitDirs{}, notGit(nil)
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(path, target)
+		gitDir, err = resolvePointer(root, target)
+		if err != nil {
+			return gitDirs{}, fromResolve(err, repo.CodeLocalPathNotGit)
 		}
-		gitDir = filepath.Clean(target)
 	}
-	if hi, err := os.Stat(filepath.Join(gitDir, "HEAD")); err != nil || !hi.Mode().IsRegular() {
-		return gitDirs{}, notGit(err)
+	if hi, err := statLocal(filepath.Join(gitDir, "HEAD")); err != nil || !hi.Mode().IsRegular() {
+		return gitDirs{}, fromResolve(err, repo.CodeLocalPathNotGit)
 	}
 
 	common := gitDir
-	if data, err := readLimited(ctx, filepath.Join(gitDir, "commondir"), maxPointerBytes); err == nil {
-		if rel := strings.TrimSpace(firstLine(string(data))); rel != "" {
-			if filepath.IsAbs(rel) {
-				common = filepath.Clean(rel)
-			} else {
-				common = filepath.Join(gitDir, rel)
+	data, err := readLimited(ctx, filepath.Join(gitDir, "commondir"), maxPointerBytes)
+	if err != nil {
+		var re *repo.Error
+		if errors.As(err, &re) && re.Code == repo.CodeLocalPathNetwork {
+			return gitDirs{}, err
+		}
+	} else if rel := strings.TrimSpace(firstLine(string(data))); rel != "" {
+		c, err := resolvePointer(gitDir, rel)
+		if err != nil {
+			var re *repo.Error
+			if errors.As(err, &re) && re.Code == repo.CodeLocalPathNetwork {
+				return gitDirs{}, err
 			}
+			// An unusable commondir is ignored: the git dir itself is used.
+		} else {
+			common = c
 		}
 	}
 	return gitDirs{git: gitDir, common: common}, nil
+}
+
+// resolvePointer turns a path found inside a checkout (a "gitdir:" or
+// "commondir" value) into a resolved absolute directory: a network or device
+// path is refused as a string, a relative one is taken relative to base, and
+// links are resolved without ever following one that leads to the network.
+func resolvePointer(base, target string) (string, error) {
+	if err := screenTarget(target); err != nil {
+		return "", err
+	}
+	return resolveLocal(pointerPath(base, target))
+}
+
+// pointerPath makes a "gitdir:" or "commondir" value absolute the way git does:
+// an absolute value stays as it is, a value rooted without a drive (Windows
+// "\foo") lives on the drive of base, and anything else is relative to base.
+func pointerPath(base, target string) string {
+	switch {
+	case filepath.IsAbs(target):
+		return target
+	case target != "" && os.IsPathSeparator(target[0]):
+		return filepath.VolumeName(base) + target
+	default:
+		return filepath.Join(base, target)
+	}
+}
+
+// statLocal is os.Stat after resolveLocal.
+func statLocal(p string) (os.FileInfo, error) {
+	r, err := resolveLocal(p)
+	if err != nil {
+		return nil, err
+	}
+	return os.Stat(r)
+}
+
+// fromResolve maps an error from resolveLocal or readLimited to what callers
+// report: a classified error passes through unchanged, anything else (the path
+// does not exist, cannot be read) becomes the given code.
+func fromResolve(err error, code repo.Code) error {
+	if err == nil {
+		return &repo.Error{Code: code, Field: "localPath"}
+	}
+	var re *repo.Error
+	if errors.As(err, &re) {
+		return err
+	}
+	return &repo.Error{Code: code, Field: "localPath", Err: err}
 }
 
 func firstLine(s string) string {
@@ -143,6 +218,12 @@ func firstLine(s string) string {
 // in which the path could be swapped.
 func readLimited(ctx context.Context, path string, limit int64) ([]byte, error) {
 	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// resolveLocal: refuse network and device paths, and links that lead to
+	// them, before any open or stat of the target.
+	path, err := resolveLocal(path)
+	if err != nil {
 		return nil, err
 	}
 	fi, err := os.Stat(path)

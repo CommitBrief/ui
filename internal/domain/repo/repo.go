@@ -6,11 +6,14 @@
 package repo
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/CommitBrief/ui/internal/domain/fspath"
 )
 
 // Limits on user supplied values.
@@ -76,26 +79,51 @@ func ValidateName(name string) error {
 	return nil
 }
 
-// ValidateLocalPath checks the shape of a local checkout path: absolute, no
-// NUL byte, bounded length. It returns nil for the empty string (no path).
+// ValidateLocalPath checks the shape of a local checkout path: bounded length
+// and an allowlisted absolute path for the running OS (fspath.ValidateLocal:
+// on Windows only X:\... drive paths, on Unix absolute paths without NUL).
+// Network and device paths are refused with CodeLocalPathNetwork. It is a pure
+// string check; it never touches the file system. It returns nil for the empty
+// string (no path).
 func ValidateLocalPath(p string) error {
 	if p == "" {
 		return nil
 	}
-	if len(p) > MaxLocalPathLen || strings.ContainsRune(p, 0) || !filepath.IsAbs(p) {
+	if len(p) > MaxLocalPathLen {
 		return &Error{Code: CodeLocalPathInvalid, Field: "localPath"}
 	}
-	return nil
+	// Before anything that could resolve the path: on Windows merely stat-ing
+	// a UNC path makes the machine authenticate to that host.
+	switch err := fspath.ValidateLocal(p); {
+	case err == nil:
+		return nil
+	case errors.Is(err, fspath.ErrNetwork):
+		return &Error{Code: CodeLocalPathNetwork, Field: "localPath"}
+	default:
+		return &Error{Code: CodeLocalPathInvalid, Field: "localPath"}
+	}
 }
 
-// NormalizeLocalPath cleans a path that passed ValidateLocalPath
-// (redundant separators, dot segments, trailing separator) without touching the
-// file system. The empty string stays empty.
-func NormalizeLocalPath(p string) string {
+// CleanLocalPath is the single entry point for a local path that arrives from
+// outside (form field, import file): it trims, validates the shape (network and
+// device paths are refused before anything else) and cleans redundant
+// separators and dot segments. It performs no file system access. The empty
+// string stays empty.
+func CleanLocalPath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
 	if p == "" {
-		return ""
+		return "", nil
 	}
-	return filepath.Clean(p)
+	if err := ValidateLocalPath(p); err != nil {
+		return "", err
+	}
+	c := filepath.Clean(p)
+	// Clean can only shorten the path, but check the result too: what is stored
+	// and later used is the cleaned form.
+	if err := ValidateLocalPath(c); err != nil {
+		return "", err
+	}
+	return c, nil
 }
 
 // Code is a member of the closed set of repository error codes. The backend
@@ -104,9 +132,13 @@ func NormalizeLocalPath(p string) string {
 type Code string
 
 const (
-	CodeOwnerInvalid      Code = "repo_owner_invalid"
-	CodeNameInvalid       Code = "repo_name_invalid"
-	CodeLocalPathInvalid  Code = "repo_local_path_invalid"
+	CodeOwnerInvalid     Code = "repo_owner_invalid"
+	CodeNameInvalid      Code = "repo_name_invalid"
+	CodeLocalPathInvalid Code = "repo_local_path_invalid"
+	// CodeLocalPathNetwork: a UNC, device or remote extended-length path, or a
+	// symlink / git pointer that leads to one. Refused without any file system
+	// access.
+	CodeLocalPathNetwork  Code = "repo_local_path_network"
 	CodeLocalPathMissing  Code = "repo_local_path_missing"
 	CodeLocalPathNotGit   Code = "repo_local_path_not_git"
 	CodeDuplicate         Code = "repo_duplicate"

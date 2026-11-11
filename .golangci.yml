@@ -26,6 +26,9 @@ linters:
             - "**/internal/domain/**"
           allow:
             - $gostd
+            # Domain packages may build on each other (repo uses fspath); the
+            # rule stays "no I/O, no adapters, no third party".
+            - github.com/CommitBrief/ui/internal/domain
           deny:
             - pkg: os/exec
               desc: the domain performs no I/O and never spawns processes
