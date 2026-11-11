@@ -62,11 +62,12 @@ type SettingsStore interface {
 }
 
 // Tx is the transactional view of the stores: everything reached through it
-// commits or rolls back together. Later phases add the job and run stores to
-// it.
+// commits or rolls back together.
 type Tx interface {
 	Repos() RepoStore
 	Settings() SettingsStore
+	Jobs() JobStore
+	Runs() RunStore
 }
 
 // TxRunner runs fn in one database transaction. fn returning an error rolls
@@ -117,10 +118,6 @@ type RecoverySource interface {
 
 // JobRecord is a stored job definition (table jobs). spec is opaque to the
 // store; its schema is owned by the job kind and versioned by SpecVersion.
-//
-// JobStore and RunStore are declared here as signatures only; the SQLite
-// implementations arrive with the scheduler and history phases (08 and 12),
-// which may refine them.
 type JobRecord struct {
 	ID          int64
 	Kind        string
@@ -137,19 +134,31 @@ type JobRecord struct {
 
 // JobStore persists job definitions and their repository targets.
 type JobStore interface {
+	// CreateJob inserts j (ID and CreatedAt are assigned by the store) with its
+	// targets and returns the stored row. A target that is not a stored
+	// repository returns ErrNotFound.
 	CreateJob(ctx context.Context, j JobRecord) (JobRecord, error)
+	// GetJob returns the job with its targets or ErrNotFound.
 	GetJob(ctx context.Context, id int64) (JobRecord, error)
+	// ListJobs returns every job, oldest first, with its targets.
 	ListJobs(ctx context.Context) ([]JobRecord, error)
+	// UpdateJob replaces name, spec, mode, enabled and targets of the row with
+	// j.ID (the kind never changes). ErrNotFound when it does not exist.
 	UpdateJob(ctx context.Context, j JobRecord) error
+	// DeleteJob removes the job and its targets; its runs stay with the job
+	// reference cleared. ErrNotFound when it does not exist.
 	DeleteJob(ctx context.Context, id int64) error
 }
 
-// RunRecord is one execution of a job (table runs).
+// RunRecord is one execution of a job (table runs). JobID is 0 for a one-off
+// run that has no stored job.
 type RunRecord struct {
 	ID    int64
 	JobID int64
 	// Trigger is "schedule", "manual" or "catchup".
-	Trigger    string
+	Trigger string
+	// StartedAt is when the run was created (queued); the table has no
+	// separate queue time.
 	StartedAt  time.Time
 	FinishedAt *time.Time
 	Status     string
@@ -160,28 +169,73 @@ type RunRecord struct {
 // TaskRecord is one repository (or pull request) unit of work inside a run
 // (table tasks).
 type TaskRecord struct {
-	ID           int64
-	RunID        int64
+	ID    int64
+	RunID int64
+	// Kind and Spec are what the job kind planned (columns added by migration
+	// 0002).
+	Kind string
+	Spec json.RawMessage
+	// RepositoryID is 0 when the task has no repository (or it was deleted).
 	RepositoryID int64
 	// PRNumber is 0 for a local review.
-	PRNumber     int
-	Status       string
-	ExitCode     *int
-	CLIVersion   string
-	HeadOID      string
-	Verdict      string
+	PRNumber   int
+	Status     string
+	ErrorCode  string
+	ExitCode   *int
+	CLIVersion string
+	HeadOID    string
+	Verdict    string
+	// FindingsJSON and ReportJSON are empty in a listing made without payload.
 	FindingsJSON json.RawMessage
 	ReportJSON   json.RawMessage
+	// FindingCount is the length of the stored findings array; filled by every
+	// read, payload or not.
+	FindingCount int
 	LogPath      string
 	CostUSD      float64
+	QueuedAt     time.Time
+	StartedAt    *time.Time
+	FinishedAt   *time.Time
+}
+
+// TaskLogRef names the log file of a task, for the retention sweep.
+type TaskLogRef struct {
+	TaskID int64
+	Path   string
 }
 
 // RunStore persists runs and their tasks.
 type RunStore interface {
+	// CreateRun inserts r (ID assigned by the store) and returns the stored row.
 	CreateRun(ctx context.Context, r RunRecord) (RunRecord, error)
+	// UpdateRun replaces status, error code, cost and finish time of the row.
+	// ErrNotFound when it does not exist.
 	UpdateRun(ctx context.Context, r RunRecord) error
+	// GetRun returns the run or ErrNotFound.
+	GetRun(ctx context.Context, id int64) (RunRecord, error)
+	// ListRuns returns the newest runs first. jobID 0 means every run; limit
+	// bounds the result.
 	ListRuns(ctx context.Context, jobID int64, limit int) ([]RunRecord, error)
+	// CreateTask inserts t (ID assigned by the store) and returns the stored row.
 	CreateTask(ctx context.Context, t TaskRecord) (TaskRecord, error)
+	// UpdateTask replaces everything a task gains while it runs: status, error
+	// code, result columns, log path, cost and timestamps. ErrNotFound when it
+	// does not exist.
 	UpdateTask(ctx context.Context, t TaskRecord) error
-	ListTasks(ctx context.Context, runID int64) ([]TaskRecord, error)
+	// GetTask returns the task with its payload or ErrNotFound.
+	GetTask(ctx context.Context, id int64) (TaskRecord, error)
+	// ListTasks returns the tasks of a run in creation order. Without payload
+	// the findings and report columns are left out (a history list must not
+	// carry megabytes); FindingCount is filled either way.
+	ListTasks(ctx context.Context, runID int64, withPayload bool) ([]TaskRecord, error)
+	// AbortUnfinished marks every queued or running task and run canceled (with
+	// error code "canceled" and finish time at). It is called at start-up: the
+	// previous process ended before they did. It returns how many tasks it
+	// changed.
+	AbortUnfinished(ctx context.Context, at time.Time) (int, error)
+	// ExpiredLogs lists the log files of finished tasks whose run started
+	// before the cutoff or is not among the keepNewest most recent runs.
+	ExpiredLogs(ctx context.Context, before time.Time, keepNewest int) ([]TaskLogRef, error)
+	// ClearLog forgets the log path of a task whose file was removed.
+	ClearLog(ctx context.Context, taskID int64) error
 }

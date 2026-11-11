@@ -129,6 +129,8 @@ type memTx struct{ m *memStore }
 
 func (t memTx) Repos() port.RepoStore        { return t.m }
 func (t memTx) Settings() port.SettingsStore { return nil }
+func (t memTx) Jobs() port.JobStore          { return nil }
+func (t memTx) Runs() port.RunStore          { return nil }
 
 // fakeInspector knows a fixed set of checkouts: path -> origin (empty origin
 // means a checkout without a remote).

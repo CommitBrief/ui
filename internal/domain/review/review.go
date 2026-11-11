@@ -44,17 +44,17 @@ func (s Severity) Rank() int {
 // Finding is one review finding. Line is 1-based; LineEnd is 0 unless the
 // finding spans several lines.
 type Finding struct {
-	Severity    Severity
-	File        string
-	Line        int
-	LineEnd     int
-	Title       string
-	Description string
-	Suggestion  string
-	Language    string
-	Snippet     string
-	RuleID      string
-	Fingerprint string
+	Severity    Severity `json:"severity"`
+	File        string   `json:"file"`
+	Line        int      `json:"line"`
+	LineEnd     int      `json:"lineEnd"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Suggestion  string   `json:"suggestion"`
+	Language    string   `json:"language"`
+	Snippet     string   `json:"snippet"`
+	RuleID      string   `json:"ruleId"`
+	Fingerprint string   `json:"fingerprint"`
 }
 
 // Verdict is a GitHub review verdict.
@@ -68,26 +68,26 @@ const (
 
 // Usage is the token accounting of a review.
 type Usage struct {
-	InputTokens       int
-	OutputTokens      int
-	CachedInputTokens int
+	InputTokens       int `json:"inputTokens"`
+	OutputTokens      int `json:"outputTokens"`
+	CachedInputTokens int `json:"cachedInputTokens"`
 }
 
 // Meta describes how a review was produced.
 type Meta struct {
-	Provider        string
-	Model           string
-	Lang            string
-	Usage           Usage
-	CostUSD         float64
-	LatencyMS       int64
-	Cached          bool
-	Timestamp       time.Time
-	Baselined       int
-	Suppressed      int
-	RetryCount      int
-	DegradeReason   string
-	FilteredCommits int
+	Provider        string    `json:"provider"`
+	Model           string    `json:"model"`
+	Lang            string    `json:"lang"`
+	Usage           Usage     `json:"usage"`
+	CostUSD         float64   `json:"costUsd"`
+	LatencyMS       int64     `json:"latencyMs"`
+	Cached          bool      `json:"cached"`
+	Timestamp       time.Time `json:"timestamp"`
+	Baselined       int       `json:"baselined"`
+	Suppressed      int       `json:"suppressed"`
+	RetryCount      int       `json:"retryCount"`
+	DegradeReason   string    `json:"degradeReason"`
+	FilteredCommits int       `json:"filteredCommits"`
 }
 
 // RemoteStatus is how a posting-mode `remote pr` run ended.
@@ -103,58 +103,58 @@ const (
 
 // RemoteReview describes the review attempt of a posting-mode run.
 type RemoteReview struct {
-	Mode          string // full | incremental | none
-	FullReason    string
-	PreviousOID   string
-	Attempts      int
-	MarkerWritten bool
+	Mode          string `json:"mode"` // full | incremental | none
+	FullReason    string `json:"fullReason"`
+	PreviousOID   string `json:"previousOid"`
+	Attempts      int    `json:"attempts"`
+	MarkerWritten bool   `json:"markerWritten"`
 }
 
 // RemoteSync counts what the comment-sync step did.
 type RemoteSync struct {
-	Mode       string // synced | post_only | skipped
-	Posted     int
-	Updated    int
-	Unchanged  int
-	Resolved   int
-	Replied    int
-	Held       int
-	PostFailed int
-	Unanchored int
+	Mode       string `json:"mode"` // synced | post_only | skipped
+	Posted     int    `json:"posted"`
+	Updated    int    `json:"updated"`
+	Unchanged  int    `json:"unchanged"`
+	Resolved   int    `json:"resolved"`
+	Replied    int    `json:"replied"`
+	Held       int    `json:"held"`
+	PostFailed int    `json:"postFailed"`
+	Unanchored int    `json:"unanchored"`
 }
 
 // Warning is one machine-readable warning of a posting-mode run. Code is an
 // open set.
 type Warning struct {
-	Code   string
-	Op     string
-	Ref    string
-	Count  int
-	Detail string
+	Code   string `json:"code"`
+	Op     string `json:"op"`
+	Ref    string `json:"ref"`
+	Count  int    `json:"count"`
+	Detail string `json:"detail"`
 }
 
 // Remote is the ADR-0048 report of a posting-mode `remote pr` run.
 type Remote struct {
-	Status          RemoteStatus
-	Repo            string
-	Number          int
-	HeadOID         string
-	Verdict         Verdict
-	VerdictUncapped Verdict
-	MaxVerdict      Verdict
-	Review          RemoteReview
-	Sync            *RemoteSync
-	Warnings        []Warning
+	Status          RemoteStatus `json:"status"`
+	Repo            string       `json:"repo"`
+	Number          int          `json:"number"`
+	HeadOID         string       `json:"headOid"`
+	Verdict         Verdict      `json:"verdict"`
+	VerdictUncapped Verdict      `json:"verdictUncapped"`
+	MaxVerdict      Verdict      `json:"maxVerdict"`
+	Review          RemoteReview `json:"review"`
+	Sync            *RemoteSync  `json:"sync,omitempty"`
+	Warnings        []Warning    `json:"warnings"`
 }
 
 // Report is a complete review result. Findings is never nil. Content holds
 // raw model text only when the review degraded. Remote is set only by a
 // posting-mode run.
 type Report struct {
-	Content  string
-	Findings []Finding
-	Meta     Meta
-	Remote   *Remote
+	Content  string    `json:"content"`
+	Findings []Finding `json:"findings"`
+	Meta     Meta      `json:"meta"`
+	Remote   *Remote   `json:"remote,omitempty"`
 }
 
 // Degraded reports whether the provider answer could not be parsed into

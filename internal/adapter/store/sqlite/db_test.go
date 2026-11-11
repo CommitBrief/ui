@@ -48,6 +48,33 @@ func openAt(t *testing.T, path string) *Store {
 	return s
 }
 
+// latestVersion is the schema version of the embedded migration set.
+func latestVersion(t *testing.T) int {
+	t.Helper()
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(ms)
+}
+
+// openAtInit opens the database with only migration 0001, so a test can play a
+// later release on top of it with a synthetic migration.
+func openAtInit(t *testing.T, path string) *Store {
+	t.Helper()
+	ms, err := loadMigrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(context.Background(), path, WithLogger(quietLog), WithClock(testClock()),
+		func(o *options) { o.migrations = ms[:1] })
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}
+
 func tableNames(t *testing.T, db *sql.DB) []string {
 	t.Helper()
 	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
@@ -84,8 +111,8 @@ func TestMigrationOnEmptyDatabase(t *testing.T) {
 		t.Errorf("tables = %v, want %v", got, want)
 	}
 	v, err := currentVersion(context.Background(), s.db)
-	if err != nil || v != 1 {
-		t.Errorf("schema version = %d, %v; want 1", v, err)
+	if want := latestVersion(t); err != nil || v != want {
+		t.Errorf("schema version = %d, %v; want %d", v, err, want)
 	}
 	if got := pragma(t, s.db, "journal_mode"); got != "wal" {
 		t.Errorf("journal_mode = %q, want wal", got)
@@ -151,8 +178,8 @@ func TestSecondOpenIsIdempotent(t *testing.T) {
 
 	s2 := openAt(t, path)
 	var rows int
-	if err := s2.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&rows); err != nil || rows != 1 {
-		t.Errorf("schema_migrations rows = %d, %v; want 1", rows, err)
+	if err := s2.db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&rows); err != nil || rows != latestVersion(t) {
+		t.Errorf("schema_migrations rows = %d, %v; want %d", rows, err, latestVersion(t))
 	}
 	if v, ok, err := s2.Settings().Get(ctx, "language"); err != nil || !ok || v != "tr" {
 		t.Errorf("setting after reopen = %q, %v, %v", v, ok, err)
@@ -187,14 +214,15 @@ func TestOpenHonorsCanceledContext(t *testing.T) {
 // --- migrations -----------------------------------------------------------
 
 // twoMigrations is the real 0001 plus a synthetic 0002 that adds a column and
-// a row, standing in for a future release.
+// a row, standing in for a future release. Tests that use it open the database
+// with openAtInit, so the synthetic step is the one that runs.
 func twoMigrations(t *testing.T) []migration {
 	t.Helper()
 	real, err := loadMigrations()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return append(real, migration{
+	return append(real[:1:1], migration{
 		version: 2,
 		name:    "add_note",
 		up:      "ALTER TABLE settings ADD COLUMN note TEXT; INSERT INTO settings (key, value, note) VALUES ('from_0002', '1', 'n');",
@@ -204,7 +232,7 @@ func twoMigrations(t *testing.T) []migration {
 
 func TestMigrationBacksUpExistingDataFirst(t *testing.T) {
 	ctx := context.Background()
-	s := openAt(t, dbPath(t))
+	s := openAtInit(t, dbPath(t))
 	if err := s.Settings().Set(ctx, "keep", "me"); err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +278,7 @@ func TestMigrationBacksUpExistingDataFirst(t *testing.T) {
 
 func TestFailedMigrationRollsBackAndKeepsBackup(t *testing.T) {
 	ctx := context.Background()
-	s := openAt(t, dbPath(t))
+	s := openAtInit(t, dbPath(t))
 	if err := s.Settings().Set(ctx, "keep", "me"); err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +308,7 @@ func TestFailedMigrationRollsBackAndKeepsBackup(t *testing.T) {
 
 func TestMigrationsAreReversible(t *testing.T) {
 	ctx := context.Background()
-	s := openAt(t, dbPath(t))
+	s := openAtInit(t, dbPath(t))
 	ms := twoMigrations(t)
 
 	if err := s.migrateTo(ctx, ms, 2); err != nil {
@@ -389,8 +417,8 @@ func TestCorruptDatabaseWithoutBackupStartsEmptyAndKeepsTheDamagedFile(t *testin
 	}
 
 	// The live database is a fresh, fully migrated, writable one.
-	if v, err := currentVersion(ctx, s.db); err != nil || v != 1 {
-		t.Errorf("schema version = %d, %v; want 1", v, err)
+	if v, err := currentVersion(ctx, s.db); err != nil || v != latestVersion(t) {
+		t.Errorf("schema version = %d, %v; want %d", v, err, latestVersion(t))
 	}
 	if list, err := s.Repos().List(ctx); err != nil || len(list) != 0 {
 		t.Errorf("the new database is not empty: %v, %v", list, err)
@@ -473,7 +501,8 @@ func TestCorruptDatabaseIsRestoredFromBackup(t *testing.T) {
 	path := dbPath(t)
 	clock := testClock()
 
-	s, err := Open(ctx, path, WithLogger(quietLog), WithClock(clock))
+	initOnly := twoMigrations(t)[:1]
+	s, err := Open(ctx, path, WithLogger(quietLog), WithClock(clock), func(o *options) { o.migrations = initOnly })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,8 +528,8 @@ func TestCorruptDatabaseIsRestoredFromBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The shipped binary knows only migration 0001, so the v1 backup that is
-	// restored is already current.
+	// The shipped binary knows every embedded migration: the v1 backup that is
+	// restored is migrated forward on the way in.
 	r, err := Open(ctx, path, WithLogger(quietLog), WithClock(clock))
 	if err != nil {
 		t.Fatalf("Open after corruption: %v", err)

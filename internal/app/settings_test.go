@@ -231,6 +231,8 @@ type settingsTx struct{ m *memSettingsDB }
 
 func (t settingsTx) Repos() port.RepoStore        { return nil }
 func (t settingsTx) Settings() port.SettingsStore { return t.m }
+func (t settingsTx) Jobs() port.JobStore          { return nil }
+func (t settingsTx) Runs() port.RunStore          { return nil }
 
 type fakeGitHub struct {
 	st  port.AuthStatus

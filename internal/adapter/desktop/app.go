@@ -31,6 +31,7 @@ type State struct {
 	Repos    *app.Repos
 	Health   *app.Health
 	Settings *app.Settings
+	Jobs     *app.Runs
 	// Close releases the database and the data-directory lock.
 	Close func() error
 }
@@ -127,6 +128,7 @@ func Run(opts Options) error {
 	app.RegisterService(application.NewService(NewReposService(state.Repos, logger)))
 	app.RegisterService(application.NewService(NewHealthService(state.Health, logger)))
 	app.RegisterService(application.NewService(NewSettingsService(state.Settings, logger)))
+	app.RegisterService(application.NewService(NewJobsService(state.Jobs, logger)))
 
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   mainWindowName,

@@ -3,6 +3,12 @@
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as errcode$0 from "../domain/errcode/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as run$0 from "../domain/run/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as settings$0 from "../domain/settings/models.js";
 
 /**
@@ -166,6 +172,31 @@ export interface ImportResult {
 }
 
 /**
+ * LocalReviewInput asks for a review of the changes in a repository's checkout.
+ */
+export interface LocalReviewInput {
+    "repositoryId": number;
+
+    /**
+     * Mode is "staged", "unstaged" or "range".
+     */
+    "mode": string;
+
+    /**
+     * Range holds the `git diff` revision arguments of a "range" review.
+     */
+    "range": string[] | null;
+}
+
+/**
+ * PRPreviewInput asks for a preview review of one pull request.
+ */
+export interface PRPreviewInput {
+    "repositoryId": number;
+    "number": number;
+}
+
+/**
  * ProviderConfig holds the two readable per-provider fields.
  */
 export interface ProviderConfig {
@@ -216,4 +247,47 @@ export interface RepoInput {
     "owner": string;
     "name": string;
     "localPath": string;
+}
+
+/**
+ * RunStatusEvent is the payload of EventRunStatus.
+ */
+export interface RunStatusEvent {
+    "runId": number;
+    "status": run$0.Status;
+    "errorCode": errcode$0.Code;
+}
+
+/**
+ * TaskLogEvent is the payload of EventTaskLog. The line is already masked.
+ */
+export interface TaskLogEvent {
+    "runId": number;
+    "taskId": number;
+    "line": string;
+}
+
+/**
+ * TaskLogView is the tail of a task's log.
+ */
+export interface TaskLogView {
+    /**
+     * Text is the masked stderr of the task, the last 256 KiB at most.
+     */
+    "text": string;
+
+    /**
+     * Truncated is true when earlier lines were left out.
+     */
+    "truncated": boolean;
+}
+
+/**
+ * TaskStatusEvent is the payload of EventTaskStatus.
+ */
+export interface TaskStatusEvent {
+    "runId": number;
+    "taskId": number;
+    "status": run$0.Status;
+    "errorCode": errcode$0.Code;
 }

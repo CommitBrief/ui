@@ -116,9 +116,12 @@ func (s *Store) migrateTo(ctx context.Context, ms []migration, target int) error
 		return fmt.Errorf("%w (database at version %d, application knows %d)", ErrNewerSchema, current, len(ms))
 	}
 
+	// A database that was empty when this run began holds no data worth a copy,
+	// however many migrations then build it (a fresh install runs all of them).
+	existing := current > 0
 	for current < target {
 		m := ms[current] // versions are contiguous: ms[current] is current+1
-		if current > 0 {
+		if existing {
 			backup, err := s.backupBeforeMigration(ctx, s.db, current)
 			if err != nil {
 				return err

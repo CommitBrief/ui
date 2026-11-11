@@ -151,6 +151,12 @@ func (s *Store) Repos() port.RepoStore { return repoStore{q: s.db, now: s.now} }
 // Settings is the settings store on the shared pool.
 func (s *Store) Settings() port.SettingsStore { return settingsStore{q: s.db} }
 
+// Jobs is the job store on the shared pool.
+func (s *Store) Jobs() port.JobStore { return jobStore{q: s.db, now: s.now} }
+
+// Runs is the run and task store on the shared pool.
+func (s *Store) Runs() port.RunStore { return runStore{q: s.db} }
+
 // InTx implements port.TxRunner.
 func (s *Store) InTx(ctx context.Context, fn func(port.Tx) error) (err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -191,6 +197,8 @@ type txView struct {
 
 func (v txView) Repos() port.RepoStore        { return repoStore{q: v.tx, now: v.now} }
 func (v txView) Settings() port.SettingsStore { return settingsStore{q: v.tx} }
+func (v txView) Jobs() port.JobStore          { return jobStore{q: v.tx, now: v.now} }
+func (v txView) Runs() port.RunStore          { return runStore{q: v.tx} }
 
 // querier is what both *sql.DB and *sql.Tx offer; the stores run on either.
 type querier interface {

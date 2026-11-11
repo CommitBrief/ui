@@ -10,8 +10,14 @@ export type {
     ConfigScope,
     DatabaseNotice,
     ImportResult,
+    LocalReviewInput,
+    PRPreviewInput,
     ProviderConfig,
     ProviderView,
     RemoteSuggestion,
-    RepoInput
+    RepoInput,
+    RunStatusEvent,
+    TaskLogEvent,
+    TaskLogView,
+    TaskStatusEvent
 } from "./models.js";

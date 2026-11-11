@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	ui "github.com/CommitBrief/ui"
 	"github.com/CommitBrief/ui/internal/adapter/clicmd"
@@ -19,6 +20,7 @@ import (
 	"github.com/CommitBrief/ui/internal/adapter/gitinfo"
 	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
 	"github.com/CommitBrief/ui/internal/app"
+	"github.com/CommitBrief/ui/internal/app/jobkinds"
 	"github.com/CommitBrief/ui/internal/domain/settings"
 	"github.com/CommitBrief/ui/internal/platform"
 )
@@ -109,10 +111,58 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		logger.Warn("reading the UI settings failed; using the defaults", "error", err, "cause", cause)
 	}
 
+	runs, err := newRuns(ctx, store, engine, dirs, logger)
+	if err != nil {
+		_ = store.Close()
+		_ = lock.Release()
+		return desktop.State{}, err
+	}
+
 	return desktop.State{
 		Repos:    app.NewRepos(store.Repos(), store, gitinfo.New()),
 		Health:   app.NewHealth(store),
 		Settings: settingsSvc,
-		Close:    func() error { return errors.Join(store.Close(), lock.Release()) },
+		Jobs:     runs,
+		Close: func() error {
+			// Stop the running reviews first (their CLI process trees die
+			// with their context), then let go of the database.
+			stop, cancel := context.WithTimeout(context.Background(), runsShutdownGrace)
+			defer cancel()
+			return errors.Join(runs.Close(stop), store.Close(), lock.Release())
+		},
 	}, nil
+}
+
+// runsShutdownGrace is how long quitting waits for running reviews to stop. The
+// CLI adapter's own SIGTERM-to-SIGKILL window is 5 seconds.
+const runsShutdownGrace = 15 * time.Second
+
+// newRuns builds the manual-jobs service: the two job kinds on top of the CLI
+// adapter, the stores, the Wails event emitter and the log directory. Start
+// marks what an earlier process left unfinished as canceled and applies the log
+// retention policy once.
+func newRuns(ctx context.Context, store *sqlite.Store, engine *clicmd.Engine, dirs platform.Dirs, logger *slog.Logger) (*app.Runs, error) {
+	kinds, err := app.NewKindRegistry(
+		jobkinds.NewReviewLocal(store.Repos(), engine),
+		jobkinds.NewReviewPR(store.Repos(), engine),
+	)
+	if err != nil {
+		return nil, err
+	}
+	runs := app.NewRuns(app.RunsDeps{
+		Kinds:    kinds,
+		Jobs:     store.Jobs(),
+		Runs:     store.Runs(),
+		Tx:       store,
+		Settings: store.Settings(),
+		Events:   desktop.NewEventEmitter(),
+		Logger:   logger,
+		LogDir:   dirs.Log,
+		Env:      platform.OSEnv{},
+	})
+	if err := runs.Start(ctx); err != nil {
+		// Not fatal: unfinished rows from the last run stay as they are.
+		logger.Warn("preparing the run service failed", "error", err)
+	}
+	return runs, nil
 }
