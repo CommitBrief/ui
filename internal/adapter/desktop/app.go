@@ -10,6 +10,8 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 	"github.com/wailsapp/wails/v3/pkg/events"
+
+	"github.com/CommitBrief/ui/internal/app"
 )
 
 const (
@@ -23,11 +25,29 @@ const (
 	mainWindowHeight = 720
 )
 
+// State is the opened persistent state: the use-case services bound to the
+// webview and the function that closes the state again.
+type State struct {
+	Repos  *app.Repos
+	Health *app.Health
+	// Close releases the database and the data-directory lock.
+	Close func() error
+}
+
 // Options configures the desktop shell.
 type Options struct {
 	// Assets is the embedded frontend build (the directory that contains
 	// index.html, or a tree that contains frontend/dist).
 	Assets fs.FS
+	// OpenState opens the persistent state and returns the services the
+	// frontend may call. Required.
+	//
+	// Run calls it only after the single-instance guard has been passed: a
+	// second launch exits (after waking the first instance) before OpenState
+	// runs, so it never migrates, restores or otherwise touches the database
+	// of the instance that is already running. Do not move this call above
+	// application.New (TestRunOpensStateAfterSingleInstanceGuard).
+	OpenState func() (State, error)
 	// Logger receives shell diagnostics. Defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -47,6 +67,9 @@ type shell struct {
 func Run(opts Options) error {
 	if opts.Assets == nil {
 		return errors.New("desktop: Options.Assets is required")
+	}
+	if opts.OpenState == nil {
+		return errors.New("desktop: Options.OpenState is required")
 	}
 	logger := opts.Logger
 	if logger == nil {
@@ -80,6 +103,23 @@ func Run(opts Options) error {
 			return true
 		},
 	})
+
+	// application.New above holds the single-instance guard: a second launch
+	// has already notified the first instance and exited. Only now may the
+	// database be opened.
+	state, err := opts.OpenState()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := state.Close(); err != nil {
+			logger.Error("closing the persistent state", "error", err)
+		}
+	}()
+	// Only registered services are reachable from the webview. Add a service
+	// here, never widen the runtime allowlist (security.go).
+	app.RegisterService(application.NewService(NewReposService(state.Repos, logger)))
+	app.RegisterService(application.NewService(NewHealthService(state.Health, logger)))
 
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   mainWindowName,

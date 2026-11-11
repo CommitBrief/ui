@@ -5,17 +5,82 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
+	"log/slog"
+	"path/filepath"
+	"runtime"
 
 	ui "github.com/CommitBrief/ui"
 	"github.com/CommitBrief/ui/internal/adapter/desktop"
+	"github.com/CommitBrief/ui/internal/adapter/gitinfo"
+	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
+	"github.com/CommitBrief/ui/internal/app"
+	"github.com/CommitBrief/ui/internal/platform"
+)
+
+const (
+	// dbFileName is the UI database inside the OS config directory (UI-0006).
+	dbFileName = "ui.db"
+	// lockFileName guards the data directory: only its holder may open,
+	// migrate or restore the database.
+	lockFileName = "ui.lock"
 )
 
 func main() {
-	err := desktop.Run(desktop.Options{
-		Assets: ui.Assets,
-	})
-	if err != nil {
+	if err := run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func run() error {
+	logger := slog.Default()
+
+	dirs, err := platform.UserDirs(runtime.GOOS)
+	if err != nil {
+		return err
+	}
+	if err := dirs.Ensure(); err != nil {
+		return err
+	}
+
+	// The database is opened by desktop.Run once the single-instance guard
+	// has been passed (see desktop.Options.OpenState), never here.
+	err = desktop.Run(desktop.Options{
+		Assets: ui.Assets,
+		OpenState: func() (desktop.State, error) {
+			return openState(context.Background(), dirs, logger)
+		},
+		Logger: logger,
+	})
+	if errors.Is(err, platform.ErrLocked) {
+		// The Wails guard normally catches a second launch first; this is
+		// the backstop when the data directory is held by an instance it
+		// did not see. Nothing was touched, so just stand down.
+		logger.Info("another CommitBrief UI instance holds the data directory; exiting")
+		return nil
+	}
+	return err
+}
+
+// openState takes the data-directory lock and only then opens the database
+// (integrity check, migrations, recovery). The order is the point: whoever does
+// not hold the lock must never reach sqlite.Open. State.Close closes the
+// database and releases the lock.
+func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (desktop.State, error) {
+	lock, err := platform.AcquireFileLock(filepath.Join(dirs.Data, lockFileName))
+	if err != nil {
+		return desktop.State{}, err
+	}
+	store, err := sqlite.Open(ctx, filepath.Join(dirs.Data, dbFileName), sqlite.WithLogger(logger))
+	if err != nil {
+		_ = lock.Release()
+		return desktop.State{}, err
+	}
+	return desktop.State{
+		Repos:  app.NewRepos(store.Repos(), store, gitinfo.New()),
+		Health: app.NewHealth(store),
+		Close:  func() error { return errors.Join(store.Close(), lock.Release()) },
+	}, nil
 }
