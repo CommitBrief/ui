@@ -63,7 +63,11 @@ $PROC"
 add internal/adapter/github/gh/zz_selftest.go     -                                 gh       "$EXEC
 $PROC"
 
-out="$(golangci-lint run . ./cmd/... ./internal/... 2>&1 || true)"
+# golangci-lint prints file paths with the host's separator, so on Windows a
+# finding reads `internal\domain\zz_selftest.go:5:8: ...`. The expectations
+# below use `/`; normalise the output (depguard itself already matches globs
+# against ToSlash'ed paths, so the rules are not affected, only this grep).
+out="$(golangci-lint run . ./cmd/... ./internal/... 2>&1 | tr '\\' '/' || true)"
 
 fail=0
 for i in "${!files[@]}"; do

@@ -84,7 +84,9 @@ linters:
           msg: only internal/adapter/clicmd and internal/adapter/github/gh may start processes
   exclusions:
     rules:
-      - path: internal/adapter/(clicmd|github/gh)/
+      # Either separator: golangci-lint matches `path` against the host's path
+      # form, which uses backslashes on Windows.
+      - path: 'internal[/\\]adapter[/\\](clicmd|github[/\\]gh)[/\\]'
         linters:
           - forbidigo
       - path: _test\.go
