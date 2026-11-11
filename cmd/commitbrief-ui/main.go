@@ -13,10 +13,13 @@ import (
 	"runtime"
 
 	ui "github.com/CommitBrief/ui"
+	"github.com/CommitBrief/ui/internal/adapter/clicmd"
 	"github.com/CommitBrief/ui/internal/adapter/desktop"
+	"github.com/CommitBrief/ui/internal/adapter/github/gh"
 	"github.com/CommitBrief/ui/internal/adapter/gitinfo"
 	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
 	"github.com/CommitBrief/ui/internal/app"
+	"github.com/CommitBrief/ui/internal/domain/settings"
 	"github.com/CommitBrief/ui/internal/platform"
 )
 
@@ -78,9 +81,38 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		_ = lock.Release()
 		return desktop.State{}, err
 	}
+
+	// The CLI adapter asks Settings for the user's CLI path override before
+	// every call, and Settings asks the CLI adapter for config and providers:
+	// the closure ties the knot.
+	var settingsSvc *app.Settings
+	engine := clicmd.New(clicmd.Config{
+		DataDir:      dirs.Data,
+		OverridePath: func() string { return settingsSvc.CLIPathOverride() },
+	})
+	settingsSvc = app.NewSettings(app.SettingsDeps{
+		Engine: engine,
+		Tx:     store,
+		Store:  store.Settings(),
+		Repos:  store.Repos(),
+		GitHub: gh.New(gh.Config{}),
+		Env:    platform.OSEnv{},
+	})
+	if err := settingsSvc.Load(ctx); err != nil {
+		// Not fatal: the CLI is then discovered automatically.
+		// The error's text is only its code; the cause is what says why.
+		cause := err
+		var se *settings.Error
+		if errors.As(err, &se) && se.Err != nil {
+			cause = se.Err
+		}
+		logger.Warn("reading the UI settings failed; using the defaults", "error", err, "cause", cause)
+	}
+
 	return desktop.State{
-		Repos:  app.NewRepos(store.Repos(), store, gitinfo.New()),
-		Health: app.NewHealth(store),
-		Close:  func() error { return errors.Join(store.Close(), lock.Release()) },
+		Repos:    app.NewRepos(store.Repos(), store, gitinfo.New()),
+		Health:   app.NewHealth(store),
+		Settings: settingsSvc,
+		Close:    func() error { return errors.Join(store.Close(), lock.Release()) },
 	}, nil
 }

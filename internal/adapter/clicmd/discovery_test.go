@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/CommitBrief/ui/internal/domain/errcode"
+	"github.com/CommitBrief/ui/internal/platform"
 )
 
 // fakeExecutable creates an empty executable for the running OS in dir.
@@ -144,6 +145,55 @@ func TestDiscoveryBrokenOverrideIsAnErrorNotAFallthrough(t *testing.T) {
 	}
 }
 
+// The override is validated as a local absolute path before any file system
+// access. Each row names a path CheckExecutable alone could accept or probe
+// (a real .exe under a POSIX root, a UNC share), so a pass proves the
+// fspath gate ran first.
+func TestDiscoveryOverrideRejectsNonLocalPathsOnWindows(t *testing.T) {
+	f := newDiscoveryFixture(t)
+	fakeExecutable(t, f.pathDir, "commitbrief")
+	cases := map[string]string{
+		"UNC share":         `\\host\share\commitbrief.exe`,
+		"forward-slash UNC": `//host/share/commitbrief.exe`,
+		"extended UNC":      `\\?\UNC\host\share\commitbrief.exe`,
+		"extended drive":    `\\?\C:\bin\commitbrief.exe`,
+		"device namespace":  `\\.\pipe\commitbrief.exe`,
+		"NT object path":    `\??\C:\bin\commitbrief.exe`,
+		"drive-relative":    `C:bin\commitbrief.exe`,
+		"rooted, no drive":  `\bin\commitbrief.exe`,
+		"mixed separators":  `C:\bin/commitbrief.exe`,
+		"alternate stream":  `C:\bin\commitbrief.exe:stream`,
+		"reserved name":     `C:\bin\NUL`,
+		"NUL byte":          "C:\\bin\\commitbrief.exe\x00",
+		"relative":          `bin\commitbrief.exe`,
+		"POSIX path":        `/usr/local/bin/commitbrief.exe`,
+	}
+	if runtime.GOOS != "windows" {
+		// A real, executable-looking file: only the fspath gate refuses it.
+		cases["existing POSIX .exe"] = fakeExecutableAs(t, f.known, "commitbrief.exe")
+	}
+	for name, override := range cases {
+		d := f.discoverer(f.pathDir, "", override)
+		d.GOOS = "windows"
+		_, err := d.Discover(context.Background())
+		if !errcode.Is(err, errcode.CLINotFound) {
+			t.Errorf("%s: err = %v, want cli_not_found", name, err)
+		}
+	}
+}
+
+func fakeExecutableAs(t *testing.T, dir, file string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, file)
+	if err := os.WriteFile(p, []byte("MZ"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
 func TestDiscoveryProbeRunsOncePerRefresh(t *testing.T) {
 	f := newDiscoveryFixture(t)
 	fakeExecutable(t, f.probeDr, "commitbrief")
@@ -262,11 +312,11 @@ func TestDiscoverySplitPathList(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		abs = `C:\bin`
 	}
-	got := splitPathList(strings.Join([]string{abs, "", ".", "rel/dir", abs + string(filepath.Separator)}, sep))
+	got := platform.SplitPathList(strings.Join([]string{abs, "", ".", "rel/dir", abs + string(filepath.Separator)}, sep))
 	if len(got) != 2 || got[0] != abs || got[1] != abs {
 		t.Errorf("splitPathList = %v, want only the absolute entries", got)
 	}
-	if got := uniqueDirs(got); len(got) != 1 {
+	if got := platform.UniqueDirs(got); len(got) != 1 {
 		t.Errorf("uniqueDirs = %v", got)
 	}
 }

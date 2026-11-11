@@ -28,8 +28,9 @@ const (
 // State is the opened persistent state: the use-case services bound to the
 // webview and the function that closes the state again.
 type State struct {
-	Repos  *app.Repos
-	Health *app.Health
+	Repos    *app.Repos
+	Health   *app.Health
+	Settings *app.Settings
 	// Close releases the database and the data-directory lock.
 	Close func() error
 }
@@ -78,7 +79,12 @@ func Run(opts Options) error {
 	s := &shell{log: logger}
 
 	app := application.New(application.Options{
-		Name:        appName,
+		Name: appName,
+		// Wails logs every bound call with its JSON arguments at Debug level
+		// ("Binding call complete", args and result). SetConfig's arguments
+		// carry an API key, so the system logger stays at Info or above;
+		// TestWailsLogLevelStaysAboveDebug pins it.
+		LogLevel:    slog.LevelInfo,
 		Description: "Desktop companion for the CommitBrief CLI",
 		Assets: application.AssetOptions{
 			Handler:    application.AssetFileServerFS(opts.Assets),
@@ -120,6 +126,7 @@ func Run(opts Options) error {
 	// here, never widen the runtime allowlist (security.go).
 	app.RegisterService(application.NewService(NewReposService(state.Repos, logger)))
 	app.RegisterService(application.NewService(NewHealthService(state.Health, logger)))
+	app.RegisterService(application.NewService(NewSettingsService(state.Settings, logger)))
 
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   mainWindowName,

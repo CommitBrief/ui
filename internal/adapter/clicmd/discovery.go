@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/CommitBrief/ui/internal/domain/errcode"
+	"github.com/CommitBrief/ui/internal/domain/fspath"
 	"github.com/CommitBrief/ui/internal/platform"
 	"github.com/CommitBrief/ui/internal/port"
 )
@@ -85,7 +86,7 @@ func (d Discovery) Env(base []string) []string {
 // FindTool locates another executable (for example `gh`) in the discovered
 // PATH. It performs a file lookup only; nothing is executed.
 func (d Discovery) FindTool(name string) (string, bool) {
-	return lookupInDirs(d.PathDirs, name, d.goos)
+	return platform.LookupInDirs(d.PathDirs, name, d.goos)
 }
 
 // Discoverer locates the CLI. The login-shell probe runs at most once per
@@ -133,36 +134,42 @@ func (d *Discoverer) Refresh() {
 func (d *Discoverer) Discover(ctx context.Context) (Discovery, error) {
 	goos := d.goos()
 	shellPath := d.loginShellPath(ctx)
-	processDirs := splitPathList(d.getenv("PATH"))
-	probeDirs := splitPathList(shellPath)
+	processDirs := platform.SplitPathList(d.getenv("PATH"))
+	probeDirs := platform.SplitPathList(shellPath)
 	knownCandidates := knownDirs(goos, d.Env)
 	if d.KnownDirs != nil {
 		knownCandidates = d.KnownDirs()
 	}
-	known := existingDirs(knownCandidates)
+	known := platform.ExistingDirs(knownCandidates)
 	managedBin := ManagedBinaryPath(d.DataDir, goos)
 
-	pathDirs := uniqueDirs(probeDirs, processDirs)
+	pathDirs := platform.UniqueDirs(probeDirs, processDirs)
 	newDisc := func(bin string, src Source, extra ...string) Discovery {
-		all := uniqueDirs(extra, pathDirs, known)
+		all := platform.UniqueDirs(extra, pathDirs, known)
 		return Discovery{Binary: bin, Source: src, PathDirs: all, goos: goos}
 	}
 
 	if d.Override != nil {
 		if o := strings.TrimSpace(d.Override()); o != "" {
-			if err := checkExecutable(o, goos); err != nil {
+			// Defence in depth: app.Settings validates the path too, but this
+			// adapter must not stat or exec a network/device path (a UNC stat
+			// on Windows triggers NTLM authentication) whatever feeds Override.
+			if err := fspath.ValidateLocalFor(goos, o); err != nil {
+				return Discovery{}, errcode.Wrap(errcode.CLINotFound, "the configured commitbrief path is not a local absolute path", err)
+			}
+			if err := platform.CheckExecutable(o, goos); err != nil {
 				return Discovery{}, errcode.Wrap(errcode.CLINotFound, "the configured commitbrief path is not usable", err)
 			}
 			return newDisc(o, SourceOverride), nil
 		}
 	}
-	if bin, ok := lookupInDirs(pathDirs, cliName, goos); ok {
+	if bin, ok := platform.LookupInDirs(pathDirs, cliName, goos); ok {
 		return newDisc(bin, SourcePath), nil
 	}
-	if bin, ok := lookupInDirs(known, cliName, goos); ok {
+	if bin, ok := platform.LookupInDirs(known, cliName, goos); ok {
 		return newDisc(bin, SourceKnown), nil
 	}
-	if d.DataDir != "" && checkExecutable(managedBin, goos) == nil {
+	if d.DataDir != "" && platform.CheckExecutable(managedBin, goos) == nil {
 		// The managed directory goes first so the CLI's own "which commitbrief"
 		// check after an upgrade resolves to the copy it just replaced.
 		return newDisc(managedBin, SourceManaged, filepath.Dir(managedBin)), nil
@@ -275,98 +282,4 @@ func knownDirs(goos string, env port.ProcessEnv) []string {
 		dirs = append(dirs, gobin)
 	}
 	return dirs
-}
-
-// splitPathList splits a PATH value into absolute, clean directories. Relative
-// entries (including the empty entry, which means the current directory on
-// Unix) are dropped: resolving a binary relative to the working directory would
-// let a repository plant one.
-func splitPathList(list string) []string {
-	if list == "" {
-		return nil
-	}
-	var out []string
-	for _, e := range strings.Split(list, string(os.PathListSeparator)) {
-		e = strings.Trim(strings.TrimSpace(e), `"`)
-		if e == "" || !filepath.IsAbs(e) {
-			continue
-		}
-		out = append(out, filepath.Clean(e))
-	}
-	return out
-}
-
-func uniqueDirs(lists ...[]string) []string {
-	seen := make(map[string]bool)
-	var out []string
-	for _, l := range lists {
-		for _, d := range l {
-			if d == "" || !filepath.IsAbs(d) {
-				continue
-			}
-			d = filepath.Clean(d)
-			if seen[d] {
-				continue
-			}
-			seen[d] = true
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-func existingDirs(dirs []string) []string {
-	var out []string
-	for _, d := range uniqueDirs(dirs) {
-		if info, err := os.Stat(d); err == nil && info.IsDir() {
-			out = append(out, d)
-		}
-	}
-	return out
-}
-
-// executableNames are the file names tried for a tool. Only .exe on Windows:
-// a .cmd/.bat shim would be run through cmd.exe, which re-parses the argument
-// string.
-func executableNames(name, goos string) []string {
-	if goos == "windows" {
-		return []string{name + ".exe"}
-	}
-	return []string{name}
-}
-
-func lookupInDirs(dirs []string, name, goos string) (string, bool) {
-	for _, d := range dirs {
-		for _, n := range executableNames(name, goos) {
-			p := filepath.Join(d, n)
-			if checkExecutable(p, goos) == nil {
-				return p, true
-			}
-		}
-	}
-	return "", false
-}
-
-// checkExecutable accepts an absolute path to a regular, executable file.
-func checkExecutable(p, goos string) error {
-	if !filepath.IsAbs(p) {
-		return fmt.Errorf("%q is not an absolute path", p)
-	}
-	info, err := os.Stat(p)
-	if err != nil {
-		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%q is not a regular file", p)
-	}
-	if goos == "windows" {
-		if !strings.EqualFold(filepath.Ext(p), ".exe") {
-			return fmt.Errorf("%q is not an .exe file", p)
-		}
-		return nil
-	}
-	if info.Mode().Perm()&0o111 == 0 {
-		return fmt.Errorf("%q is not executable", p)
-	}
-	return nil
 }

@@ -3,7 +3,9 @@
 
 import * as HealthService from "./healthservice.js";
 import * as ReposService from "./reposservice.js";
+import * as SettingsService from "./settingsservice.js";
 export {
     HealthService,
-    ReposService
+    ReposService,
+    SettingsService
 };

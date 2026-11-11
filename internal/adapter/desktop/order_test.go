@@ -35,3 +35,22 @@ func TestRunOpensStateAfterSingleInstanceGuard(t *testing.T) {
 		t.Error("OpenState is called before Run")
 	}
 }
+
+// Wails logs each bound call's JSON arguments at Debug level, and SetConfig's
+// arguments carry an API key. Run therefore pins the Wails system logger above
+// Debug; this guard fails if that line goes away or is lowered.
+func TestWailsLogLevelStaysAboveDebug(t *testing.T) {
+	src, err := os.ReadFile("app.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(src)[strings.Index(string(src), "func Run("):]
+	if !strings.Contains(body, "LogLevel:") || !strings.Contains(body, "slog.LevelInfo") {
+		t.Fatal("Run must set application.Options.LogLevel to slog.LevelInfo (bound-call arguments, including API keys, are logged at Debug)")
+	}
+	for _, bad := range []string{"slog.LevelDebug", "LogLevel: -", "LogLevel:    slog.Level(-"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("Run lowers the Wails log level (%q)", bad)
+		}
+	}
+}
