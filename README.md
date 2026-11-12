@@ -57,9 +57,11 @@ Layer boundaries are enforced by `depguard` in `.golangci.yml`; see
 
 Tagged releases are built, signed (macOS Developer ID and notarization, Windows
 Authenticode, Linux PGP) and published by `.github/workflows/release.yml`; the app
-updates itself from them, checking an Ed25519 signature before anything is
-installed. The maintainer's runbook (secrets, test releases, key rotation, taking a
-release back) is [docs/RELEASING.md](docs/RELEASING.md).
+updates itself from them, installing an update only if it matches the SHA-256 in
+the release's `checksums.txt` (that guards against a corrupt download, not against
+someone who can write to the release; the operating-system signature is checked at
+the first install, not when the app updates itself). The maintainer's runbook (secrets, test
+releases, taking a release back) is [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

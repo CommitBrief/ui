@@ -3,8 +3,6 @@
 package updater
 
 import (
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,17 +24,6 @@ const (
 	testGOARCH = "amd64"
 	testSuffix = ".AppImage"
 )
-
-// newKey makes a throwaway Ed25519 key pair. Keys exist only in tests; none is
-// ever committed.
-func newKey(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return pub, priv
-}
 
 // testRelease is one release the fake feed serves.
 type testRelease struct {
@@ -65,9 +52,9 @@ func artefactFor(t *testing.T, tag string) string {
 	return artifactName(versionOf(t, tag), testGOOS, testGOARCH, testSuffix)
 }
 
-// signedRelease builds a release whose checksums list payload under the
-// artefact name and are signed with priv.
-func signedRelease(t *testing.T, tag string, priv ed25519.PrivateKey, payload []byte) *testRelease {
+// newRelease builds a release whose checksums.txt lists payload under the
+// artefact name.
+func newRelease(t *testing.T, tag string, payload []byte) *testRelease {
 	t.Helper()
 	name := artefactFor(t, tag)
 	sum := sha256.Sum256(payload)
@@ -79,7 +66,6 @@ func signedRelease(t *testing.T, tag string, priv ed25519.PrivateKey, payload []
 		files: map[string][]byte{
 			name:          payload,
 			ChecksumsName: checksums,
-			SignatureName: EncodeSignature(ed25519.Sign(priv, checksums)),
 		},
 	}
 }
@@ -160,16 +146,16 @@ func (f *testFeed) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 // source builds a Source for the test system pointed at the feed.
-func (f *testFeed) source(keys ...ed25519.PublicKey) *Source {
+func (f *testFeed) source() *Source {
 	return NewSource(SourceConfig{
 		Repository:   testRepo,
 		APIBase:      f.srv.URL + "/api",
 		DownloadBase: f.srv.URL + "/dl",
-		PublicKeys:   keys,
 		GOOS:         testGOOS,
 		GOARCH:       testGOARCH,
 		Suffix:       testSuffix,
 		Version:      "0.0.0-test",
+		allowHTTP:    true,
 	})
 }
 

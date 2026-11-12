@@ -81,14 +81,13 @@ func (h *harness) seen() []update.State {
 // updater running 0.1.0 against it.
 func newHarness(t *testing.T, payload []byte, mutate func(r *testRelease)) *harness {
 	t.Helper()
-	pub, priv := newKey(t)
-	rel := signedRelease(t, "v0.2.0", priv, payload)
+	rel := newRelease(t, "v0.2.0", payload)
 	if mutate != nil {
 		mutate(rel)
 	}
 	h := &harness{t: t, feed: newTestFeed(t, rel), backend: &fakeBackend{}, staging: filepath.Join(t.TempDir(), "updates")}
 	h.up = New(Config{
-		Feed:       h.feed.source(pub),
+		Feed:       h.feed.source(),
 		Backend:    h.backend,
 		Current:    "0.1.0",
 		StagingDir: h.staging,
@@ -118,7 +117,7 @@ func (h *harness) stagingEntries() []string {
 	return names
 }
 
-func TestUpdateInstallValidSignatureAndChecksum(t *testing.T) {
+func TestUpdateInstallValidChecksum(t *testing.T) {
 	payload := []byte(strings.Repeat("new application bytes ", 5000))
 	h := newHarness(t, payload, nil)
 	ctx := context.Background()
@@ -168,7 +167,7 @@ func equalStates(a, b []update.State) bool {
 	return true
 }
 
-func TestUpdateInstallRejectsAnArtefactThatDoesNotMatchTheSignedChecksum(t *testing.T) {
+func TestUpdateInstallRejectsAnArtefactThatDoesNotMatchItsChecksum(t *testing.T) {
 	h := newHarness(t, []byte("the genuine artefact"), nil)
 	ctx := context.Background()
 	if rel, err := h.up.Check(ctx, update.ChannelStable); err != nil || rel == nil {
@@ -198,7 +197,7 @@ func TestUpdateInstallRejectsAnArtefactThatDoesNotMatchTheSignedChecksum(t *test
 }
 
 func TestUpdateInstallRejectsAnArtefactSwappedBeforeTheCheck(t *testing.T) {
-	// The release list says the artefact is the right size, the signed checksum
+	// The release list says the artefact is the right size, checksums.txt
 	// is for the genuine file, and the server serves something else.
 	genuine := []byte("0123456789")
 	h := newHarness(t, genuine, func(r *testRelease) {
@@ -217,48 +216,33 @@ func TestUpdateInstallRejectsAnArtefactSwappedBeforeTheCheck(t *testing.T) {
 	}
 }
 
-func TestUpdateCheckRejectsWhatTheFeedCannotProve(t *testing.T) {
-	cases := map[string]struct {
-		mutate func(r *testRelease)
-		want   update.Code
-	}{
-		"missing signature": {func(r *testRelease) { delete(r.files, SignatureName) }, update.CodeSignatureMissing},
-		"bad signature":     {func(r *testRelease) { r.files[SignatureName] = []byte("AAAA") }, update.CodeSignatureInvalid},
+func TestUpdateCheckRejectsAReleaseWithoutUsableChecksums(t *testing.T) {
+	cases := map[string]func(r *testRelease){
+		"no checksums.txt": func(r *testRelease) { delete(r.files, ChecksumsName) },
+		"artefact not listed": func(r *testRelease) {
+			r.files[ChecksumsName] = []byte(strings.Repeat("a", 64) + "  something_else.zip\n")
+		},
+		"malformed checksums": func(r *testRelease) { r.files[ChecksumsName] = []byte("not a checksums file\n") },
+		"empty checksums":     func(r *testRelease) { r.files[ChecksumsName] = nil },
 	}
-	for name, tc := range cases {
+	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			h := newHarness(t, []byte("app"), tc.mutate)
+			h := newHarness(t, []byte("app"), mutate)
 			rel, err := h.up.Check(context.Background(), update.ChannelStable)
-			if rel != nil || codeOf(err) != tc.want {
-				t.Fatalf("Check = %+v, %v; want %q", rel, err, tc.want)
+			if rel != nil || codeOf(err) != update.CodeChecksumMissing {
+				t.Fatalf("Check = %+v, %v; want %q", rel, err, update.CodeChecksumMissing)
 			}
-			if st := h.up.Status(); st.State != update.StateFailed || st.Error != tc.want || st.Available != nil {
+			if st := h.up.Status(); st.State != update.StateFailed || st.Error != update.CodeChecksumMissing || st.Available != nil {
 				t.Errorf("status = %+v", st)
 			}
 			// Nothing was found, so nothing can be installed.
 			if err := h.up.Install(context.Background()); codeOf(err) != update.CodeNothingToInstall {
 				t.Errorf("Install = %v", err)
 			}
+			if h.backend.callList() != "" {
+				t.Error("the backend was reached")
+			}
 		})
-	}
-}
-
-func TestUpdateCheckWithWrongKeyRejects(t *testing.T) {
-	_, priv := newKey(t)
-	otherPub, _ := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, []byte("app")))
-	up := New(Config{Feed: feed.source(otherPub), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: t.TempDir()})
-	if rel, err := up.Check(context.Background(), update.ChannelStable); rel != nil || codeOf(err) != update.CodeSignatureInvalid {
-		t.Errorf("Check = %+v, %v", rel, err)
-	}
-}
-
-func TestUpdateCheckWithoutAKeyIsKeyMissing(t *testing.T) {
-	_, priv := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, []byte("app")))
-	up := New(Config{Feed: feed.source(), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: t.TempDir()})
-	if _, err := up.Check(context.Background(), update.ChannelStable); codeOf(err) != update.CodeKeyMissing {
-		t.Errorf("Check = %v", err)
 	}
 }
 
@@ -337,9 +321,8 @@ func TestUpdateInstallWithoutACheck(t *testing.T) {
 	}
 	// Up to date drops a pending release.
 	h2 := newHarness(t, []byte("x"), nil)
-	pub, priv := newKey(t)
-	h2.feed.releases = []*testRelease{signedRelease(t, "v0.1.0", priv, []byte("same"))}
-	h2.up = New(Config{Feed: h2.feed.source(pub), Backend: h2.backend, Current: "0.1.0", StagingDir: h2.staging})
+	h2.feed.releases = []*testRelease{newRelease(t, "v0.1.0", []byte("same"))}
+	h2.up = New(Config{Feed: h2.feed.source(), Backend: h2.backend, Current: "0.1.0", StagingDir: h2.staging})
 	if rel, err := h2.up.Check(context.Background(), update.ChannelStable); rel != nil || err != nil {
 		t.Fatalf("Check = %v, %v", rel, err)
 	}
@@ -349,9 +332,7 @@ func TestUpdateInstallWithoutACheck(t *testing.T) {
 }
 
 func TestDelegatedInstallationsDoNotUpdate(t *testing.T) {
-	_, priv := newKey(t)
-	pub, _ := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, []byte("x")))
+	feed := newTestFeed(t, newRelease(t, "v0.2.0", []byte("x")))
 	cases := map[string]Config{
 		"package manager": {Current: "0.1.0", Delegation: update.DelegationPackageManager},
 		"development":     {Current: update.DevVersion},
@@ -361,7 +342,7 @@ func TestDelegatedInstallationsDoNotUpdate(t *testing.T) {
 	}
 	for name, cfg := range cases {
 		t.Run(name, func(t *testing.T) {
-			cfg.Feed, cfg.Backend, cfg.StagingDir = feed.source(pub), &fakeBackend{}, t.TempDir()
+			cfg.Feed, cfg.Backend, cfg.StagingDir = feed.source(), &fakeBackend{}, t.TempDir()
 			up := New(cfg)
 			if up.Delegation() == update.DelegationNone {
 				t.Fatal("not delegated")
@@ -514,17 +495,16 @@ func TestUpdateStalledDownloadIsAbandoned(t *testing.T) {
 }
 
 func TestUpdateDownloadSizeCap(t *testing.T) {
-	pub, priv := newKey(t)
 	payload := []byte(strings.Repeat("y", 4096))
 	build := func(t *testing.T, listed int64, hook func(w http.ResponseWriter, r *http.Request) bool) (*Updater, *testFeed, string) {
-		rel := signedRelease(t, "v0.2.0", priv, payload)
+		rel := newRelease(t, "v0.2.0", payload)
 		if listed > 0 {
 			rel.listedSize = map[string]int64{artefactFor(t, "v0.2.0"): listed}
 		}
 		feed := newTestFeed(t, rel)
 		feed.hook = hook
 		staging := t.TempDir()
-		up := New(Config{Feed: feed.source(pub), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: staging, MaxArtefactBytes: 1024})
+		up := New(Config{Feed: feed.source(), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: staging, MaxArtefactBytes: 1024})
 		return up, feed, staging
 	}
 
@@ -570,11 +550,10 @@ func TestUpdateDownloadSizeCap(t *testing.T) {
 
 func TestUpdateDownloadReportsProgress(t *testing.T) {
 	payload := []byte(strings.Repeat("p", 3<<20))
-	pub, priv := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, payload))
+	feed := newTestFeed(t, newRelease(t, "v0.2.0", payload))
 	var mu sync.Mutex
 	var last update.Progress
-	up := New(Config{Feed: feed.source(pub), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: t.TempDir(),
+	up := New(Config{Feed: feed.source(), Backend: &fakeBackend{}, Current: "0.1.0", StagingDir: t.TempDir(),
 		Observer: func(s update.Status) {
 			if s.Progress != nil {
 				mu.Lock()

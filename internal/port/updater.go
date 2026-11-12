@@ -8,11 +8,13 @@ import (
 	"github.com/CommitBrief/ui/internal/domain/update"
 )
 
-// Updater is the application's own self-update (UI-0007). The release feed it
-// reads is authenticated before anything is downloaded: a release whose
-// checksums are not signed by the pinned release key is rejected, and so is an
-// artefact that does not hash to a signed checksum. A rejected update leaves
-// the running version untouched.
+// Updater is the application's own self-update (UI-0007). An artefact is
+// installed only when it hashes to its line in the release's checksums.txt (a
+// missing file, a missing line or a different hash rejects it before anything is
+// unpacked). That protects against a corrupt download, not against someone who
+// can write to the release; the risk is accepted (UI-0007 section Update
+// 2026-11-12, phase 14). The OS signature of the new bundle is not verified on this
+// path (it only matters at the first install), so the hash is the only check. A rejected update leaves the running version untouched.
 //
 // Every error is an *update.Error.
 type Updater interface {

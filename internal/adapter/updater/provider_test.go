@@ -4,26 +4,27 @@ package updater
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
+	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/CommitBrief/ui/internal/domain/update"
 )
 
-func TestUpdateLatestAcceptsASignedRelease(t *testing.T) {
-	pub, priv := newKey(t)
+func TestUpdateLatestAcceptsAListedRelease(t *testing.T) {
 	payload := []byte("the new application")
-	rel := signedRelease(t, "v0.0.1-test.2", priv, payload)
+	rel := newRelease(t, "v0.0.1-test.2", payload)
 	rel.prerelease = true
 	rel.body = "Fixes\r\n\x1b[31mred\x1b[0m\x00 and <script>alert(1)</script>"
 	feed := newTestFeed(t, rel)
 
-	cand, err := feed.source(pub).Latest(context.Background(), mustVersion(t, "0.0.1-test.1"), update.ChannelPrerelease)
+	cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.0.1-test.1"), update.ChannelPrerelease)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,22 +53,21 @@ func TestUpdateLatestAcceptsASignedRelease(t *testing.T) {
 }
 
 func TestUpdateLatestMacOSUsesTheUniversalArtefact(t *testing.T) {
-	pub, priv := newKey(t)
 	v := mustVersion(t, "0.2.0")
 	name := artifactName(v, "darwin", "arm64", ".zip")
 	if name != "commitbrief-ui_0.2.0_darwin_universal.zip" {
 		t.Fatalf("name = %q", name)
 	}
-	rel := signedRelease(t, "v0.2.0", priv, []byte("x"))
-	// Re-sign for the macOS name.
+	rel := newRelease(t, "v0.2.0", []byte("x"))
+	// Re-list for the macOS name.
 	payload := []byte("mac app")
 	sum := sha256.Sum256(payload)
 	checksums := []byte(strings.Repeat("0", 64) + "  other\n")
 	checksums = append([]byte(hexString(sum)+"  "+name+"\n"), checksums...)
-	rel.files = map[string][]byte{name: payload, ChecksumsName: checksums, SignatureName: EncodeSignature(ed25519.Sign(priv, checksums))}
+	rel.files = map[string][]byte{name: payload, ChecksumsName: checksums}
 	feed := newTestFeed(t, rel)
 	src := NewSource(SourceConfig{Repository: testRepo, APIBase: feed.srv.URL + "/api", DownloadBase: feed.srv.URL + "/dl",
-		PublicKeys: []ed25519.PublicKey{pub}, GOOS: "darwin", GOARCH: "arm64", Suffix: ".zip"})
+		GOOS: "darwin", GOARCH: "arm64", Suffix: ".zip", allowHTTP: true})
 	cand, err := src.Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
 	if err != nil || cand == nil || cand.Asset != name {
 		t.Fatalf("Latest = %+v, %v", cand, err)
@@ -84,9 +84,8 @@ func hexString(sum [sha256.Size]byte) string {
 }
 
 func TestUpdateLatestChannelsAndVersions(t *testing.T) {
-	pub, priv := newKey(t)
 	mk := func(tag string, pre, draft bool) *testRelease {
-		r := signedRelease(t, tag, priv, []byte("payload "+tag))
+		r := newRelease(t, tag, []byte("payload "+tag))
 		r.prerelease, r.draft = pre, draft
 		return r
 	}
@@ -99,7 +98,7 @@ func TestUpdateLatestChannelsAndVersions(t *testing.T) {
 		mk("v0.2.0-rc.2", true, false),
 	}
 	feed := newTestFeed(t, releases...)
-	src := feed.source(pub)
+	src := feed.source()
 	ctx := context.Background()
 
 	tests := []struct {
@@ -132,9 +131,7 @@ func TestUpdateLatestChannelsAndVersions(t *testing.T) {
 	}
 }
 
-func TestUpdateLatestRejectsAnUntrustedRelease(t *testing.T) {
-	pub, priv := newKey(t)
-	_, otherPriv := newKey(t)
+func TestUpdateLatestRejectsAnUnusableRelease(t *testing.T) {
 	const tag = "v1.0.0"
 	cur := mustVersion(t, "0.9.0")
 	payload := []byte("app")
@@ -144,37 +141,29 @@ func TestUpdateLatestRejectsAnUntrustedRelease(t *testing.T) {
 		mutate func(r *testRelease)
 		want   update.Code
 	}{
-		{"no signature asset", func(r *testRelease) { delete(r.files, SignatureName) }, update.CodeSignatureMissing},
-		{"empty signature", func(r *testRelease) { r.files[SignatureName] = nil }, update.CodeSignatureMissing},
 		{"no checksums asset", func(r *testRelease) { delete(r.files, ChecksumsName) }, update.CodeChecksumMissing},
-		{"garbage signature", func(r *testRelease) { r.files[SignatureName] = []byte("not a signature") }, update.CodeSignatureInvalid},
-		{"signature of another key", func(r *testRelease) {
-			r.files[SignatureName] = EncodeSignature(ed25519.Sign(otherPriv, r.files[ChecksumsName]))
-		}, update.CodeSignatureInvalid},
-		{"checksums changed after signing", func(r *testRelease) {
-			r.files[ChecksumsName] = append([]byte(strings.Repeat("a", 64)+"  evil\n"), r.files[ChecksumsName]...)
-		}, update.CodeSignatureInvalid},
-		{"signed checksums do not list the artefact", func(r *testRelease) {
-			cs := []byte(strings.Repeat("a", 64) + "  something_else.zip\n")
-			r.files[ChecksumsName] = cs
-			r.files[SignatureName] = EncodeSignature(ed25519.Sign(priv, cs))
+		{"empty checksums", func(r *testRelease) { r.files[ChecksumsName] = nil }, update.CodeChecksumMissing},
+		{"checksums do not list the artefact", func(r *testRelease) {
+			r.files[ChecksumsName] = []byte(strings.Repeat("a", 64) + "  something_else.zip\n")
 		}, update.CodeChecksumMissing},
-		{"signed checksums are malformed", func(r *testRelease) {
-			cs := []byte("this is not a checksums file\n")
-			r.files[ChecksumsName] = cs
-			r.files[SignatureName] = EncodeSignature(ed25519.Sign(priv, cs))
+		{"checksums are malformed", func(r *testRelease) {
+			r.files[ChecksumsName] = []byte("this is not a checksums file\n")
+		}, update.CodeChecksumMissing},
+		{"checksums list the artefact twice", func(r *testRelease) {
+			name := artefactFor(t, tag)
+			r.files[ChecksumsName] = []byte(strings.Repeat("a", 64) + "  " + name + "\n" + strings.Repeat("b", 64) + "  " + name + "\n")
 		}, update.CodeChecksumMissing},
 		{"no artefact for this system", func(r *testRelease) { delete(r.files, artefactFor(t, tag)) }, update.CodeNoArtifact},
 		{"artefact of an unusable size", func(r *testRelease) { r.listedSize = map[string]int64{artefactFor(t, tag): 0} }, update.CodeNoArtifact},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			rel := signedRelease(t, tag, priv, payload)
+			rel := newRelease(t, tag, payload)
 			tc.mutate(rel)
 			feed := newTestFeed(t, rel)
-			cand, err := feed.source(pub).Latest(context.Background(), cur, update.ChannelStable)
+			cand, err := feed.source().Latest(context.Background(), cur, update.ChannelStable)
 			if cand != nil {
-				t.Fatalf("an untrusted release was accepted: %+v", cand)
+				t.Fatalf("an unusable release was accepted: %+v", cand)
 			}
 			if got := codeOf(err); got != tc.want {
 				t.Errorf("code = %q (%v), want %q", got, err, tc.want)
@@ -184,67 +173,136 @@ func TestUpdateLatestRejectsAnUntrustedRelease(t *testing.T) {
 }
 
 func TestUpdateLatestRejectsReplayedChecksums(t *testing.T) {
-	// A feed that serves the signed checksums of an old release under a new tag
-	// gets nowhere: the artefact name carries the version, so the new name is not
-	// in the old signed list.
-	pub, priv := newKey(t)
-	old := signedRelease(t, "v0.1.0", priv, []byte("old app"))
-	forged := signedRelease(t, "v0.2.0", priv, []byte("attacker app"))
+	// A feed that serves the checksums.txt of an old release under a new tag gets
+	// nowhere: the artefact name carries the version, so the new name is not in
+	// the old list.
+	old := newRelease(t, "v0.1.0", []byte("old app"))
+	forged := newRelease(t, "v0.2.0", []byte("attacker app"))
 	forged.files[ChecksumsName] = old.files[ChecksumsName]
-	forged.files[SignatureName] = old.files[SignatureName]
 	feed := newTestFeed(t, forged)
 
-	cand, err := feed.source(pub).Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
+	cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
 	if cand != nil || codeOf(err) != update.CodeChecksumMissing {
 		t.Errorf("Latest = %+v, %v; want a rejection with %q", cand, err, update.CodeChecksumMissing)
 	}
 }
 
-func TestUpdateLatestWithoutKeyMakesNoRequest(t *testing.T) {
-	_, priv := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v1.0.0", priv, []byte("x")))
-	cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
-	if cand != nil || codeOf(err) != update.CodeKeyMissing {
-		t.Errorf("Latest = %+v, %v; want %q", cand, err, update.CodeKeyMissing)
+// Nothing is fetched over plain http: with no signature, the transport is what
+// stands between the user and a stranger on the path.
+func TestUpdateSourceIsHTTPSOnly(t *testing.T) {
+	feed := newTestFeed(t, newRelease(t, "v1.0.0", []byte("x")))
+	// The production configuration: allowHTTP is off, the test server is http.
+	src := NewSource(SourceConfig{Repository: testRepo, APIBase: feed.srv.URL + "/api", DownloadBase: feed.srv.URL + "/dl",
+		GOOS: testGOOS, GOARCH: testGOARCH, Suffix: testSuffix})
+	cand, err := src.Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
+	if cand != nil || codeOf(err) != update.CodeCheckFailed {
+		t.Errorf("Latest = %+v, %v; want %q", cand, err, update.CodeCheckFailed)
+	}
+	if _, _, err := src.Open(context.Background(), &Candidate{Tag: "v1.0.0", Asset: artefactFor(t, "v1.0.0")}); codeOf(err) != update.CodeDownloadFailed {
+		t.Errorf("Open over http: %v", err)
 	}
 	if n := feed.requests.Load(); n != 0 {
-		t.Errorf("%d requests were made without a key", n)
+		t.Errorf("%d requests reached an http server", n)
 	}
 }
 
-func TestUpdateLatestAcceptsAnyKeyOfARotationSet(t *testing.T) {
-	// During a rotation the compiled-in set holds the old and the new key; a
-	// release signed with either is accepted, one signed with a third is not.
-	oldPub, oldPriv := newKey(t)
-	newPub, newPriv := newKey(t)
-	strangerPub, _ := newKey(t)
-	cur := mustVersion(t, "0.1.0")
-	ctx := context.Background()
+func TestUpdateRedirectPolicy(t *testing.T) {
+	src := NewSource(SourceConfig{})
+	mustURL := func(s string) *url.URL {
+		u, err := url.Parse(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	from := mustURL("https://github.com/CommitBrief/ui/releases/download/v1.0.0/checksums.txt")
+	tests := []struct {
+		to      string
+		allowed bool
+	}{
+		{"https://github.com/other/path", true},
+		{"https://objects.githubusercontent.com/x", true},
+		{"https://release-assets.githubusercontent.com/x", true},
+		{"https://GITHUB.com/x", true},
+		{"https://api.github.com/x", true},
+		{"http://github.com/x", false},
+		{"http://objects.githubusercontent.com/x", false},
+		{"https://example.com/x", false},
+		{"https://githubusercontent.com.evil.example/x", false},
+		{"https://evilgithub.com/x", false},
+		{"https://notgithubusercontent.com/x", false},
+		{"https://github.com.evil.example/x", false},
+		{"ftp://github.com/x", false},
+	}
+	for _, tc := range tests {
+		err := src.allowRedirect(from, mustURL(tc.to))
+		if (err == nil) != tc.allowed {
+			t.Errorf("redirect to %s: err = %v, allowed = %v", tc.to, err, tc.allowed)
+		}
+	}
+}
 
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", oldPriv, []byte("a")))
-	if cand, err := feed.source(newPub, oldPub).Latest(ctx, cur, update.ChannelStable); err != nil || cand == nil {
-		t.Errorf("signed with the old key, both listed: %v, %v", cand, err)
+// End to end: a download that is redirected to another host is refused, and the
+// redirect hop limit holds.
+func TestUpdateRefusesARedirectToAnotherHost(t *testing.T) {
+	feed := newTestFeed(t, newRelease(t, "v0.2.0", []byte("x")))
+	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, strings.Repeat("0", 64)+"  "+artefactFor(t, "v0.2.0")+"\n")
+	}))
+	t.Cleanup(evil.Close)
+	// "localhost" is another host than the feed's 127.0.0.1, so this is the
+	// off-origin redirect.
+	target := strings.Replace(evil.URL, "127.0.0.1", "localhost", 1)
+	feed.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, "/"+ChecksumsName) {
+			http.Redirect(w, r, target+"/checksums.txt", http.StatusFound)
+			return true
+		}
+		return false
 	}
-	feed = newTestFeed(t, signedRelease(t, "v0.2.0", newPriv, []byte("a")))
-	if cand, err := feed.source(newPub, oldPub).Latest(ctx, cur, update.ChannelStable); err != nil || cand == nil {
-		t.Errorf("signed with the new key, both listed: %v, %v", cand, err)
+	cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
+	if cand != nil || codeOf(err) != update.CodeCheckFailed {
+		t.Errorf("Latest = %+v, %v; want a refusal with %q", cand, err, update.CodeCheckFailed)
 	}
-	if cand, err := feed.source(oldPub, strangerPub).Latest(ctx, cur, update.ChannelStable); cand != nil || codeOf(err) != update.CodeSignatureInvalid {
-		t.Errorf("signed with a key outside the set: %v, %v", cand, err)
+
+	// A redirect that stays on the host is followed.
+	feed.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, "/"+ChecksumsName) && r.URL.RawQuery == "" {
+			http.Redirect(w, r, r.URL.Path+"?hop=1", http.StatusFound)
+			return true
+		}
+		return false
+	}
+	if cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable); err != nil || cand == nil {
+		t.Errorf("a same-host redirect was not followed: %+v, %v", cand, err)
+	}
+
+	// A redirect loop ends at the hop limit.
+	var hops atomic.Int64
+	feed.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if strings.HasSuffix(r.URL.Path, "/"+ChecksumsName) {
+			http.Redirect(w, r, fmt.Sprintf("%s?hop=%d", r.URL.Path, hops.Add(1)), http.StatusFound)
+			return true
+		}
+		return false
+	}
+	if cand, err := feed.source().Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable); cand != nil || codeOf(err) != update.CodeCheckFailed {
+		t.Errorf("a redirect loop: %+v, %v", cand, err)
+	}
+	if n := hops.Load(); n > maxRedirects+1 {
+		t.Errorf("%d hops followed, the limit is %d", n, maxRedirects)
 	}
 }
 
 func TestUpdateLatestWithoutSuffix(t *testing.T) {
-	pub, priv := newKey(t)
-	feed := newTestFeed(t, signedRelease(t, "v1.0.0", priv, []byte("x")))
-	src := NewSource(SourceConfig{Repository: testRepo, APIBase: feed.srv.URL + "/api", DownloadBase: feed.srv.URL + "/dl", PublicKeys: []ed25519.PublicKey{pub}, GOOS: "linux", GOARCH: "amd64"})
+	feed := newTestFeed(t, newRelease(t, "v1.0.0", []byte("x")))
+	src := NewSource(SourceConfig{Repository: testRepo, APIBase: feed.srv.URL + "/api", DownloadBase: feed.srv.URL + "/dl", GOOS: "linux", GOARCH: "amd64", allowHTTP: true})
 	if _, err := src.Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable); codeOf(err) != update.CodeNoArtifact {
 		t.Errorf("err = %v", err)
 	}
 }
 
 func TestUpdateLatestFeedFailures(t *testing.T) {
-	pub, priv := newKey(t)
 	cur := mustVersion(t, "0.1.0")
 	tests := []struct {
 		name string
@@ -283,8 +341,8 @@ func TestUpdateLatestFeedFailures(t *testing.T) {
 			}
 			return false
 		}},
-		{"signature file is missing on the server", func(w http.ResponseWriter, r *http.Request) bool {
-			if strings.HasSuffix(r.URL.Path, "/"+SignatureName) {
+		{"checksums.txt is missing on the server", func(w http.ResponseWriter, r *http.Request) bool {
+			if strings.HasSuffix(r.URL.Path, "/"+ChecksumsName) {
 				http.NotFound(w, r)
 				return true
 			}
@@ -293,9 +351,9 @@ func TestUpdateLatestFeedFailures(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, []byte("x")))
+			feed := newTestFeed(t, newRelease(t, "v0.2.0", []byte("x")))
 			feed.hook = tc.hook
-			cand, err := feed.source(pub).Latest(context.Background(), cur, update.ChannelStable)
+			cand, err := feed.source().Latest(context.Background(), cur, update.ChannelStable)
 			if cand != nil || codeOf(err) != update.CodeCheckFailed {
 				t.Errorf("Latest = %+v, %v; want %q", cand, err, update.CodeCheckFailed)
 			}
@@ -304,7 +362,7 @@ func TestUpdateLatestFeedFailures(t *testing.T) {
 
 	// The feed is not reachable at all.
 	feed := newTestFeed(t)
-	src := feed.source(pub)
+	src := feed.source()
 	feed.srv.Close()
 	if _, err := src.Latest(context.Background(), cur, update.ChannelStable); codeOf(err) != update.CodeCheckFailed {
 		t.Errorf("unreachable feed: %v", err)
@@ -312,10 +370,9 @@ func TestUpdateLatestFeedFailures(t *testing.T) {
 }
 
 func TestUpdateOpen(t *testing.T) {
-	pub, priv := newKey(t)
 	payload := []byte("bytes of the artefact")
-	feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, payload))
-	src := feed.source(pub)
+	feed := newTestFeed(t, newRelease(t, "v0.2.0", payload))
+	src := feed.source()
 	cand, err := src.Latest(context.Background(), mustVersion(t, "0.1.0"), update.ChannelStable)
 	if err != nil || cand == nil {
 		t.Fatalf("Latest = %v, %v", cand, err)
@@ -343,22 +400,26 @@ func TestUpdateOpen(t *testing.T) {
 	}
 }
 
-func TestUpdateRefuseDowngrade(t *testing.T) {
+func TestUpdateCheckRedirectHopsAndScheme(t *testing.T) {
+	src := NewSource(SourceConfig{})
 	mk := func(raw string) *http.Request {
 		u, _ := url.Parse(raw)
 		return &http.Request{URL: u}
 	}
-	if err := refuseDowngrade(mk("http://evil.example/x"), []*http.Request{mk("https://github.com/x")}); err == nil {
+	if err := src.checkRedirect(mk("http://github.com/x"), []*http.Request{mk("https://github.com/x")}); err == nil {
 		t.Error("an https to http redirect was followed")
 	}
-	if err := refuseDowngrade(mk("https://cdn.example/x"), []*http.Request{mk("https://github.com/x")}); err != nil {
-		t.Errorf("an https to https redirect was refused: %v", err)
+	if err := src.checkRedirect(mk("https://objects.githubusercontent.com/x"), []*http.Request{mk("https://github.com/x")}); err != nil {
+		t.Errorf("an https redirect to GitHub's asset host was refused: %v", err)
+	}
+	if err := src.checkRedirect(mk("https://cdn.example/x"), []*http.Request{mk("https://github.com/x")}); err == nil {
+		t.Error("a redirect to another host was followed")
 	}
 	via := make([]*http.Request, maxRedirects)
 	for i := range via {
 		via[i] = mk("https://github.com/x")
 	}
-	if err := refuseDowngrade(mk("https://github.com/y"), via); err == nil {
+	if err := src.checkRedirect(mk("https://github.com/y"), via); err == nil {
 		t.Error("a redirect loop was followed")
 	}
 }
@@ -384,16 +445,15 @@ func TestUpdateSanitizeNotes(t *testing.T) {
 // of it) or 401/403 is "unavailable", never "no update": the user must be told
 // that nothing was checked. Nothing is downloaded or trusted from such a feed.
 func TestUpdateLatestUnavailableFeedIsAnError(t *testing.T) {
-	pub, priv := newKey(t)
 	cur := mustVersion(t, "0.1.0")
 	for _, status := range []int{http.StatusNotFound, http.StatusUnauthorized, http.StatusForbidden} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			feed := newTestFeed(t, signedRelease(t, "v0.2.0", priv, []byte("x")))
+			feed := newTestFeed(t, newRelease(t, "v0.2.0", []byte("x")))
 			feed.hook = func(w http.ResponseWriter, r *http.Request) bool {
 				http.Error(w, `{"message":"Not Found"}`, status)
 				return true
 			}
-			cand, err := feed.source(pub).Latest(context.Background(), cur, update.ChannelStable)
+			cand, err := feed.source().Latest(context.Background(), cur, update.ChannelStable)
 			if cand != nil || codeOf(err) != update.CodeFeedUnavailable {
 				t.Errorf("Latest = %+v, %v; want %q", cand, err, update.CodeFeedUnavailable)
 			}
@@ -402,7 +462,7 @@ func TestUpdateLatestUnavailableFeedIsAnError(t *testing.T) {
 
 	// A public repository with no release yet is a healthy feed: no update.
 	feed := newTestFeed(t)
-	if cand, err := feed.source(pub).Latest(context.Background(), cur, update.ChannelStable); cand != nil || err != nil {
+	if cand, err := feed.source().Latest(context.Background(), cur, update.ChannelStable); cand != nil || err != nil {
 		t.Errorf("empty feed: Latest = %+v, %v; want nil, nil", cand, err)
 	}
 }

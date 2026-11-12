@@ -2,16 +2,22 @@
 
 Releases are built, signed and published by `.github/workflows/release.yml` when a
 `v*` tag is pushed. This page is for the maintainer: what to prepare once, how to
-cut a test release, how to rotate keys, and how to take a release back.
+cut a test release, how to rotate certificates, and how to take a release back.
 
-Two separate signatures protect a release, and they do different jobs:
+Two things protect a release, and they do different jobs:
 
-| Signature | Made with | Protects | Checked by |
+| Protection | Made with | Protects | Checked by |
 |---|---|---|---|
 | Operating system signing: Developer ID and notarization (macOS), Authenticode (Windows), PGP on the deb and rpm (Linux) | Certificates and keys you obtain from Apple, a Windows code-signing authority and your own PGP key | The first install: Gatekeeper and SmartScreen accept the download | The operating system and the package tools |
-| Update signature: Ed25519 over `checksums.txt` | A key pair you generate yourself, independent of any certificate | Every in-app update | The application, with the public key compiled in |
+| SHA-256 in `checksums.txt` | The publish job of the workflow | Every in-app update against a corrupt or truncated download | The application, before anything is unpacked |
 
-The workflow refuses to publish a release that lacks either one. A manual run of
+`checksums.txt` is not signed: it comes from the same release as the files it
+lists, so it does not protect against someone who can write to the release (a
+risk accepted on purpose, UI-0007). The operating system signing above is checked
+by the OS at the first install and launch only; the in-app updater does not verify
+it, so on the update path the SHA-256 is the only check.
+
+The workflow refuses to publish a release whose operating-system signing is incomplete. A manual run of
 the workflow (Actions, Release, Run workflow) is a dry run: it builds and packages,
 never signs (even when the secrets exist, so code from an arbitrary branch is never
 signed with the real certificates), marks its artifacts `-UNSIGNED` and never
@@ -51,7 +57,6 @@ outside it and has no secrets. The code uses only these names.
 | `WINDOWS_SIGNING_TIMESTAMP_URL` | Optional. Defaults to `http://timestamp.digicert.com` |
 | `LINUX_PGP_KEY` | The ASCII-armored private PGP key (`gpg --armor --export-secret-keys KEYID`) |
 | `LINUX_PGP_PASSPHRASE` | Its passphrase |
-| `UPDATE_ED25519_PRIVATE_KEY` | The update private key, see below |
 
 The Windows steps assume a certificate that can be exported to a `.pfx`. A
 certificate that lives on a hardware token or in a cloud signing service (an EV
@@ -59,43 +64,23 @@ certificate, Azure Trusted Signing) needs the "Sign the executable" and "Sign th
 installer" steps changed to that service; the secret names above would change with
 it.
 
-### Create the update key pair
-
-On your own machine, once:
-
-```sh
-go run scripts/sign-checksums.go keygen -private-out update-private.key
-```
-
-It prints the public key line and writes the private key to the file (mode 0600,
-never overwritten). Then:
-
-1. Store the file's content as the `UPDATE_ED25519_PRIVATE_KEY` secret and delete
-   the file. Keep one offline copy somewhere safe: losing it forces a rotation.
-2. Paste the printed public key line into
-   `internal/adapter/updater/release_key.pub` (below the comments) and commit.
-   Until this is done every build refuses all updates, and the release workflow
-   fails in its first job.
-
-The private key never goes into the repository, a log or an argument list. The
-tool reads it from the environment only.
-
 ## Cut a test release
 
-The acceptance run needs two signed test releases and a third with a broken
-signature. Tags are a decision of the maintainer; the workflow only reacts to them.
+The acceptance run needs two signed test releases and a third whose
+`checksums.txt` is wrong. Tags are a decision of the maintainer; the workflow only
+reacts to them.
 
 ```sh
 git tag v0.0.1-test.1 && git push origin v0.0.1-test.1
 ```
 
 Before the first one: the repository is public (above), the `release` environment
-and its secrets exist, and `release_key.pub` holds the update public key.
+and its secrets exist.
 
-The workflow then runs: `meta` (checks the tag, that the commit is on `main`, and
-that the update key pair matches), the three platform builds in parallel, and
-`publish` (writes `checksums.txt`, signs it, creates the GitHub release with
-`prerelease: true` because the tag has a pre-release part).
+The workflow then runs: `meta` (checks the tag and that the commit is on `main`),
+the three platform builds in parallel, and `publish` (writes `checksums.txt`,
+creates the GitHub release with `prerelease: true` because the tag has a
+pre-release part).
 
 Check the result on each system:
 
@@ -108,9 +93,9 @@ Check the result on each system:
 
 Then publish `v0.0.1-test.2`, install `test.1`, switch the update channel to
 "Pre-release" on the Updates screen, and let it update to `test.2`. For the
-negative test, make a third release whose `checksums.txt.sig` is damaged (edit the
-asset on the release, or sign with another key) and confirm the app shows
-"The release signature is not valid" and keeps running `test.2`.
+negative test, make a third release and damage its `checksums.txt` (edit the hash
+of the artefact for your system on the release) and confirm the app shows
+"The download does not match its checksum" and keeps running `test.2`.
 
 What gets updated in place:
 
@@ -121,36 +106,6 @@ What gets updated in place:
 | Linux | AppImage | the AppImage |
 | Linux | binary from the `.tar.gz` in a directory you can write | the `.tar.gz` |
 | Linux | `.deb` / `.rpm` | not self-updated; the package manager updates it |
-
-## Rotate the update key
-
-The compiled-in public key is the only trust anchor, so a new key has to reach
-users through a release that the old key signed. `release_key.pub` may list more
-than one key (up to four, one per line); a signature by any of them is accepted.
-
-1. Generate the new pair (`keygen`, above). Leave the secret as it is.
-2. Add the new public key as a second line in `release_key.pub`, keeping the old
-   one, commit, and cut release `N` as usual. It is signed with the old private key
-   (the secret), which the workflow's key check accepts because the old key is
-   still in the file. Everyone who updates to `N` now trusts both keys.
-3. Replace the `UPDATE_ED25519_PRIVATE_KEY` secret with the new private key.
-4. Cut release `N+1`, signed with the new key (the workflow accepts it because the
-   new key is in the file). Delete the old key line from `release_key.pub` in the
-   commit of `N+1` or later, once the old key is no longer needed to bridge users.
-   A copy older than `N` does not know the new key and rejects `N+1` with
-   `signature_invalid`; it cannot reach `N` from inside the application either,
-   because the updater only ever offers the highest release. Those users reinstall
-   from the release page by hand. If you must bridge them in-app, keep `N` the
-   latest release for as long as the bridge is needed and rotate afterwards.
-
-If the private key leaks, the old key line must come out of `release_key.pub`: while
-it stays, every build that carries it accepts whatever the attacker signs. So:
-generate a new pair, replace the secret, **delete the leaked public key line** (do
-not keep it as a second key), cut a new release signed with the new key, delete
-suspect releases, and say in the release notes that users on older copies must
-reinstall by hand from the release page. Copies that only know the leaked key
-cannot be protected in-app; an attacker holding the key can still sign an update
-for them until they reinstall.
 
 ## Rotate an operating-system certificate
 

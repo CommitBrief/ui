@@ -70,15 +70,15 @@ lint-selftest: frontend-build ## Prove every depguard/forbidigo layering rule st
 	bash scripts/depguard-selftest.sh
 
 fmt: ## Format Go source with gofmt (+ goimports if available)
-	gofmt -s -w *.go cmd internal scripts
+	gofmt -s -w *.go cmd internal
 	@if command -v goimports >/dev/null 2>&1; then \
-		goimports -w -local $(PKG) *.go cmd internal scripts ; \
+		goimports -w -local $(PKG) *.go cmd internal ; \
 	else \
 		echo "goimports not installed (go install golang.org/x/tools/cmd/goimports@latest)"; \
 	fi
 
 fmt-check:
-	@drift=$$(gofmt -l -s *.go cmd internal scripts || true); \
+	@drift=$$(gofmt -l -s *.go cmd internal || true); \
 	if [ -n "$$drift" ]; then \
 		echo "gofmt: needs '-s -w' on:"; echo "$$drift"; exit 1; \
 	fi
@@ -110,8 +110,7 @@ bindings-check: wails3-check frontend-deps ## Fail if committed Wails bindings d
 		echo "bindings drift: run 'wails3 generate bindings -clean=true -ts -i $(GO_PKGS)' and commit"; exit 1; \
 	fi
 
-release-check: ## Self-test the release tooling (checksum signing, version stamping) and lint the workflows
-	$(GO) run scripts/sign-checksums.go selftest
+release-check: ## Self-test the release tooling (version stamping) and lint the workflows
 	bash scripts/stamp-version.sh --selftest
 	@if command -v actionlint >/dev/null 2>&1; then \
 		actionlint .github/workflows/*.yml && echo "ok:   actionlint"; \

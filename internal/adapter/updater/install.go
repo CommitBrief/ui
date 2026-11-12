@@ -30,7 +30,7 @@ type Feed interface {
 }
 
 // Artefact is a downloaded file that has already been checked against the
-// signed checksum.
+// checksum.
 type Artefact struct {
 	// Path is the file in the staging directory.
 	Path string
@@ -38,7 +38,7 @@ type Artefact struct {
 	Name string
 	// Version is the release version.
 	Version string
-	// SHA256 is the signed digest the file was verified against.
+	// SHA256 is the digest from checksums.txt the file was verified against.
 	SHA256 [sha256.Size]byte
 }
 
@@ -90,7 +90,7 @@ const progressEvery = 250 * time.Millisecond
 // abandoned.
 const DefaultStallTimeout = 60 * time.Second
 
-// Updater is the self-update engine: it checks the signed release feed,
+// Updater is the self-update engine: it checks the release feed,
 // downloads and verifies an artefact and hands it to the Backend.
 type Updater struct {
 	cfg     Config
@@ -319,8 +319,6 @@ func classify(ctx context.Context, err error, fallback update.Code) *update.Erro
 	switch {
 	case errors.Is(err, ErrDigestMismatch):
 		return update.Wrap(update.CodeChecksumMismatch, err)
-	case errors.Is(err, ErrKeyMissing):
-		return update.Wrap(update.CodeKeyMissing, err)
 	}
 	return update.Wrap(fallback, err)
 }

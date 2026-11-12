@@ -79,7 +79,7 @@ const (
 	StateFailed State = "failed"
 )
 
-// Release is a newer version the signed release feed offered.
+// Release is a newer version the release feed offered.
 type Release struct {
 	// Version is the semantic version without "v".
 	Version    string `json:"version"`
@@ -143,19 +143,11 @@ const (
 	// releases do not exist or are not readable without credentials (404, 401,
 	// 403). Never reported as "no update": an unreachable feed is a failure.
 	CodeFeedUnavailable Code = "update_feed_unavailable"
-	// CodeKeyMissing: this build carries no update public key, so nothing can
-	// be verified and nothing is installed.
-	CodeKeyMissing Code = "update_key_missing"
-	// CodeSignatureMissing: the release has no checksums file or no signature.
-	CodeSignatureMissing Code = "update_signature_missing"
-	// CodeSignatureInvalid: the signature is malformed or was not made by the
-	// release key.
-	CodeSignatureInvalid Code = "update_signature_invalid"
-	// CodeChecksumMissing: the signed checksums do not list the artefact (or
-	// are themselves unusable).
+	// CodeChecksumMissing: the release has no checksums file, the file is
+	// unusable, or it does not list the artefact for this system.
 	CodeChecksumMissing Code = "update_checksum_missing"
-	// CodeChecksumMismatch: the downloaded artefact does not hash to the signed
-	// checksum.
+	// CodeChecksumMismatch: the downloaded artefact does not hash to its
+	// checksums.txt line.
 	CodeChecksumMismatch Code = "update_checksum_mismatch"
 	// CodeNoArtifact: the release has no artefact for this system.
 	CodeNoArtifact Code = "update_no_artifact"

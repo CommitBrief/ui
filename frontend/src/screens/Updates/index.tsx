@@ -23,9 +23,6 @@ import styles from "./Updates.module.css";
 const errorKeys: Record<string, MessageKey> = {
   [Code.CodeCheckFailed]: "updates.error.update_check_failed",
   [Code.CodeFeedUnavailable]: "updates.error.update_feed_unavailable",
-  [Code.CodeKeyMissing]: "updates.error.update_key_missing",
-  [Code.CodeSignatureMissing]: "updates.error.update_signature_missing",
-  [Code.CodeSignatureInvalid]: "updates.error.update_signature_invalid",
   [Code.CodeChecksumMissing]: "updates.error.update_checksum_missing",
   [Code.CodeChecksumMismatch]: "updates.error.update_checksum_mismatch",
   [Code.CodeNoArtifact]: "updates.error.update_no_artifact",

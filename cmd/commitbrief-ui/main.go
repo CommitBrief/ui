@@ -190,11 +190,10 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 	}, nil
 }
 
-// newUpdates builds the self-update: the signed GitHub release feed, the Wails
+// newUpdates builds the self-update: the GitHub release feed, the Wails
 // swap-and-restart backend and the use cases on top. Where the application cannot
 // replace itself (a package-manager install, a development build, a read-only
 // location) the updater is delegated: it checks nothing and installs nothing.
-// Without a release public key compiled in, every check fails closed.
 func newUpdates(store *sqlite.Store, notifier port.Notifier, clock platform.SystemClock, dirs platform.Dirs, logger *slog.Logger) *app.Updates {
 	info := platform.InstallInfo{Delegation: update.DelegationUnsupported}
 	if exe, err := os.Executable(); err == nil {
@@ -208,24 +207,12 @@ func newUpdates(store *sqlite.Store, notifier port.Notifier, clock platform.Syst
 		info = platform.InstallInfo{Delegation: update.DelegationUnsupported}
 	}
 
-	keys, err := updater.ReleasePublicKeys()
-	if err != nil {
-		// Not fatal: the application works, only updating is refused.
-		if errors.Is(err, updater.ErrKeyMissing) {
-			logger.Info("no release public key is compiled in; updates are refused")
-		} else {
-			logger.Error("the compiled-in release public key is unusable; updates are refused", "error", err)
-		}
-		keys = nil
-	}
-
 	engine := updater.New(updater.Config{
 		Feed: updater.NewSource(updater.SourceConfig{
-			PublicKeys: keys,
-			GOOS:       runtime.GOOS,
-			GOARCH:     runtime.GOARCH,
-			Suffix:     platform.ArtifactSuffix(info.Kind),
-			Version:    version,
+			GOOS:    runtime.GOOS,
+			GOARCH:  runtime.GOARCH,
+			Suffix:  platform.ArtifactSuffix(info.Kind),
+			Version: version,
 		}),
 		Backend:    desktop.NewUpdateBackend(version, logger),
 		Current:    version,

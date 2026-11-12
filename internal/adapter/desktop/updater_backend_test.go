@@ -103,9 +103,9 @@ func TestUpdateBackendStagesTheVerifiedFileThroughTheWailsUpdater(t *testing.T) 
 		t.Error("the Wails update window must stay off")
 	}
 	if len(f.cfg.PublicKey) != 0 {
-		t.Error("the Wails updater must not be given a trust anchor of its own: the signature is checked on checksums.txt before staging")
+		t.Error("the Wails updater must not be given a trust anchor of its own: there is no signature, the digest is checked on checksums.txt before staging")
 	}
-	// What the Wails updater is told to verify is the signed digest.
+	// What the Wails updater is told to verify is the digest from checksums.txt.
 	v := f.release.Verification
 	if v == nil || v.DigestAlgo != "sha256" || !bytes.Equal(v.Digest, art.SHA256[:]) || len(v.Signature) != 0 {
 		t.Errorf("verification = %+v", v)
@@ -333,13 +333,13 @@ func TestUpdateServiceShapesErrors(t *testing.T) {
 
 	// A classified failure keeps its code and loses its cause (paths, URLs).
 	secret := errors.New("GET https://example.invalid/token=abc failed in /Users/me/.cache")
-	cause := build(stubUpdater{checkErr: update.Wrap(update.CodeSignatureInvalid, secret)})
+	cause := build(stubUpdater{checkErr: update.Wrap(update.CodeChecksumMismatch, secret)})
 	_, err = cause.Check(ctx)
-	check(err, update.CodeSignatureInvalid, "")
+	check(err, update.CodeChecksumMismatch, "")
 	if strings.Contains(err.Error(), "token") || strings.Contains(err.Error(), "/Users") {
 		t.Errorf("the cause leaked into the error text: %q", err.Error())
 	}
-	check(cause.Install(ctx), update.CodeSignatureInvalid, "")
+	check(cause.Install(ctx), update.CodeChecksumMismatch, "")
 
 	// Anything that is not classified is "internal".
 	_, err = build(stubUpdater{checkErr: errors.New("disk on fire")}).Check(ctx)

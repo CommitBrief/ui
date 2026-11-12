@@ -4,7 +4,6 @@ package updater
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -27,10 +26,9 @@ const (
 	// AppName prefixes every release artefact name.
 	AppName = "commitbrief-ui"
 
-	// ChecksumsName and SignatureName are the two release assets that carry the
-	// trust chain.
+	// ChecksumsName is the release asset that lists the SHA-256 of every
+	// artefact.
 	ChecksumsName = "checksums.txt"
-	SignatureName = "checksums.txt.sig"
 )
 
 // Bounds on what is read from the network.
@@ -41,8 +39,8 @@ const (
 	// DefaultMaxArtefactBytes caps one artefact download.
 	DefaultMaxArtefactBytes = 1 << 30
 	releasesPerPage         = 30
-	// checkTimeout bounds one whole look at the feed (the list and the two trust
-	// files). The artefact download has no overall limit, only the header and
+	// checkTimeout bounds one whole look at the feed (the list and
+	// checksums.txt). The artefact download has no overall limit, only the header and
 	// stall limits: its length depends on the connection.
 	checkTimeout  = 60 * time.Second
 	headerTimeout = 30 * time.Second
@@ -58,22 +56,23 @@ type SourceConfig struct {
 	APIBase      string
 	DownloadBase string
 	// Client defaults to a client that bounds the wait for response headers and
-	// refuses an https to http redirect. A client the caller supplies is used as
-	// given.
+	// follows redirects only within https and the hosts GitHub serves releases
+	// from (see allowRedirect). A client the caller supplies is used as given.
 	Client *http.Client
-	// PublicKeys verify checksums.txt: a signature by any of them is accepted
-	// (more than one only while a key is being rotated). Without any, every
-	// Latest call fails with update.CodeKeyMissing before any request is made.
-	PublicKeys []ed25519.PublicKey
 	// GOOS and GOARCH select the artefact (runtime values in production).
 	GOOS, GOARCH string
 	// Suffix is the artefact name ending for this installation (platform.ArtifactSuffix).
 	Suffix string
 	// Version goes into the User-Agent.
 	Version string
+
+	// allowHTTP lets tests serve the feed from a local http server. It is not
+	// reachable from outside the package: production is https only.
+	allowHTTP bool
 }
 
-// Source reads releases from GitHub and authenticates them.
+// Source reads releases from GitHub and checks them against the release's own
+// checksums.txt.
 type Source struct {
 	cfg SourceConfig
 }
@@ -91,35 +90,58 @@ func NewSource(cfg SourceConfig) *Source {
 	}
 	cfg.APIBase = strings.TrimRight(cfg.APIBase, "/")
 	cfg.DownloadBase = strings.TrimRight(cfg.DownloadBase, "/")
+	s := &Source{cfg: cfg}
 	if cfg.Client == nil {
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.ResponseHeaderTimeout = headerTimeout
-		cfg.Client = &http.Client{Transport: tr, CheckRedirect: refuseDowngrade}
+		s.cfg.Client = &http.Client{Transport: tr, CheckRedirect: s.checkRedirect}
 	}
-	return &Source{cfg: cfg}
+	return s
 }
 
-// refuseDowngrade stops a redirect chain from leaving https.
-func refuseDowngrade(req *http.Request, via []*http.Request) error {
+// redirectHostSuffixes are the hosts a download may be redirected to: GitHub
+// serves release assets from github.com and, after a redirect, from
+// *.githubusercontent.com.
+var redirectHostSuffixes = []string{"github.com", "githubusercontent.com"}
+
+// checkRedirect applies allowRedirect to every hop.
+func (s *Source) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxRedirects {
 		return errors.New("updater: too many redirects")
 	}
-	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
-		return errors.New("updater: refusing a redirect from https to http")
+	return s.allowRedirect(via[0].URL, req.URL)
+}
+
+// allowRedirect decides whether a request that started at from may be sent on to
+// to. Without a signature the origin of every byte is the only thing that
+// vouches for it, so a redirect must stay on https and either on the host the
+// request started at or on a host GitHub serves release assets from.
+func (s *Source) allowRedirect(from, to *url.URL) error {
+	if to.Scheme != "https" && !s.cfg.allowHTTP {
+		return errors.New("updater: refusing a redirect to a non-https address")
 	}
-	return nil
+	host := strings.ToLower(to.Hostname())
+	if host == strings.ToLower(from.Hostname()) {
+		return nil
+	}
+	for _, suffix := range redirectHostSuffixes {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return nil
+		}
+	}
+	return errors.New("updater: refusing a redirect to another host")
 }
 
 // Candidate is a release that passed every check Latest can make before the
-// artefact itself is downloaded: its checksums are signed by the release key and
-// list the artefact for this system.
+// artefact itself is downloaded: its checksums.txt is present and lists the
+// artefact for this system.
 type Candidate struct {
 	Release update.Release
 	// Tag is the git tag of the release, used to build the download URL.
 	Tag string
 	// Asset is the artefact's file name.
 	Asset string
-	// SHA256 is the artefact's digest from the signed checksums.
+	// SHA256 is the artefact's digest from the release's checksums.txt.
 	SHA256 [sha256.Size]byte
 }
 
@@ -141,9 +163,9 @@ type assetJSON struct {
 
 // artifactName is the release artefact for a version on this system:
 // commitbrief-ui_<version>_<os>_<arch><suffix>. macOS ships one universal build.
-// The version in the name is what ties a signed checksum to one release: signed
-// checksums of an older release list older names, so replaying them under a
-// newer tag finds no entry.
+// The version in the name ties a checksum to one release: the checksums.txt of an
+// older release lists older names, so one replayed under a newer tag finds no
+// entry.
 func artifactName(version update.Version, goos, goarch, suffix string) string {
 	arch := goarch
 	if goos == "darwin" {
@@ -153,12 +175,9 @@ func artifactName(version update.Version, goos, goarch, suffix string) string {
 }
 
 // Latest returns the newest release on channel that is higher than current, with
-// its artefact authenticated, or nil when there is none. Nothing is downloaded
-// except the release list and the two small trust files.
+// the artefact's expected SHA-256 from its checksums.txt, or nil when there is
+// none. Nothing is downloaded except the release list and checksums.txt.
 func (s *Source) Latest(ctx context.Context, current update.Version, channel update.Channel) (*Candidate, error) {
-	if len(s.cfg.PublicKeys) == 0 {
-		return nil, update.New(update.CodeKeyMissing, "")
-	}
 	if s.cfg.Suffix == "" {
 		return nil, update.Wrap(update.CodeNoArtifact, errors.New("updater: this installation has no release artefact"))
 	}
@@ -195,11 +214,8 @@ func (s *Source) Latest(ctx context.Context, current update.Version, channel upd
 			have[a.Name] = a
 		}
 	}
-	// The trust files first: a release without them is rejected whatever else
-	// it holds.
-	if _, ok := have[SignatureName]; !ok {
-		return nil, update.Wrap(update.CodeSignatureMissing, fmt.Errorf("updater: release %s has no %s", best.TagName, SignatureName))
-	}
+	// checksums.txt first: a release without it is rejected whatever else it
+	// holds.
 	if _, ok := have[ChecksumsName]; !ok {
 		return nil, update.Wrap(update.CodeChecksumMissing, fmt.Errorf("updater: release %s has no %s", best.TagName, ChecksumsName))
 	}
@@ -215,24 +231,13 @@ func (s *Source) Latest(ctx context.Context, current update.Version, channel upd
 	if err != nil {
 		return nil, err
 	}
-	sig, err := s.fetchSmall(ctx, best.TagName, SignatureName, 4<<10)
-	if err != nil {
-		return nil, err
-	}
-	if err := VerifyChecksumsAny(s.cfg.PublicKeys, checksums, sig); err != nil {
-		code := update.CodeSignatureInvalid
-		if errors.Is(err, ErrSignatureMissing) {
-			code = update.CodeSignatureMissing
-		}
-		return nil, update.Wrap(code, err)
-	}
 	listed, err := ParseChecksums(checksums)
 	if err != nil {
 		return nil, update.Wrap(update.CodeChecksumMissing, err)
 	}
 	sum, ok := listed[name]
 	if !ok {
-		return nil, update.Wrap(update.CodeChecksumMissing, fmt.Errorf("updater: the signed checksums do not list %s", name))
+		return nil, update.Wrap(update.CodeChecksumMissing, fmt.Errorf("updater: the checksums do not list %s", name))
 	}
 
 	return &Candidate{
@@ -307,7 +312,7 @@ func feedFailureCode(resp *http.Response) update.Code {
 	return update.CodeCheckFailed
 }
 
-// fetchSmall downloads one of the trust files.
+// fetchSmall downloads a small release file (checksums.txt).
 func (s *Source) fetchSmall(ctx context.Context, tag, name string, limit int64) ([]byte, error) {
 	resp, err := s.get(ctx, s.downloadURL(tag, name))
 	if err != nil {
@@ -325,6 +330,12 @@ func (s *Source) fetchSmall(ctx context.Context, tag, name string, limit int64) 
 }
 
 func (s *Source) get(ctx context.Context, u string) (*http.Response, error) {
+	// Every request, not only a redirect, is https: nothing is signed any more, so
+	// the transport is the one thing standing between the user and a stranger on
+	// the path.
+	if parsed, err := url.Parse(u); err != nil || (parsed.Scheme != "https" && !s.cfg.allowHTTP) {
+		return nil, errors.New("updater: the release feed address is not https")
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

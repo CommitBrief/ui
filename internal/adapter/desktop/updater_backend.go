@@ -28,17 +28,16 @@ const providerName = "commitbrief-staged"
 const wailsStagingPrefix = "wails-update-"
 
 // UpdateBackend is the updater.Backend on top of the Wails v3 updater. By the time
-// Stage runs the artefact has been authenticated: the release key signed the
-// checksums, and the file hashes to its signed checksum. This type hands that
-// file to the Wails updater through a provider that serves the staged file, so
+// Stage runs the artefact has been checked: the file hashes to its line in the
+// release's checksums.txt. This type hands that file to the Wails updater through a provider that serves the staged file, so
 // the framework does what it is good at (unpacking the archive with zip-slip and
 // symlink checks, validating the payload, and, after this process has quit, the
 // swap with a backup that is restored when the swap or the first launch fails)
 // and nothing in it ever talks to the network.
 //
 // The Wails updater also compares the digest again while it copies, with the
-// signed one; no public key is configured on it because the signature has
-// already been checked, on checksums.txt, before any byte was downloaded.
+// same one from checksums.txt; no public key is configured on it (there is no
+// signature to check).
 type UpdateBackend struct {
 	current string
 	log     *slog.Logger
@@ -217,7 +216,7 @@ func (p *stagedProvider) get() (updater.Artefact, bool) {
 	return p.art, p.isSet
 }
 
-// Check reports the staged artefact as the available release, with the signed
+// Check reports the staged artefact as the available release, with the
 // digest the Wails updater compares while it copies.
 func (p *stagedProvider) Check(_ context.Context, _ wupdater.CheckRequest) (*wupdater.Release, error) {
 	a, ok := p.get()

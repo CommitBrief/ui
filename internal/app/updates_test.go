@@ -170,9 +170,9 @@ func TestUpdatesManualCheckUsesTheStoredChannelAndRemembersIt(t *testing.T) {
 
 func TestUpdatesFailedCheckIsNotRemembered(t *testing.T) {
 	r := newUpdatesRig(t)
-	r.up.checkErr = update.New(update.CodeSignatureInvalid, "")
+	r.up.checkErr = update.New(update.CodeChecksumMismatch, "")
 	_, err := r.svc.Check(context.Background())
-	if updateCode(err) != update.CodeSignatureInvalid {
+	if updateCode(err) != update.CodeChecksumMismatch {
 		t.Fatalf("Check = %v", err)
 	}
 	if _, ok := r.db.settings[update.KeyLastCheck]; ok {
