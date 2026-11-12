@@ -16,21 +16,21 @@ func (e maskEnv) HomeDir() (string, error)        { return "", nil }
 func TestMaskerByShape(t *testing.T) {
 	m := NewMasker(nil)
 	secretCases := []struct{ name, in, leak string }{
-		{"classic GitHub token", "token is ghp_abcdefghijklmnopqrstuvwxyz0123456789 ok", "ghp_abcdefghij"},
-		{"fine-grained GitHub token", "github_pat_11ABCDEFG0abcdefghijklmnop_qrstuvwxyz", "github_pat_11ABC"},
-		{"GH_TOKEN assignment", "GH_TOKEN=gho_16C7e42F292c6912E7710c838347Ae178B4a", "gho_16C7"},
+		{"classic GitHub token", "token is ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789 ok", "ghp_" + "abcdefghij"},
+		{"fine-grained GitHub token", "github_pat_" + "11ABCDEFG0abcdefghijklmnop_qrstuvwxyz", "github_pat_" + "11ABC"},
+		{"GH_TOKEN assignment", "GH_TOKEN=gho_" + "16C7e42F292c6912E7710c838347Ae178B4a", "gho_" + "16C7"},
 		{"GITHUB_TOKEN export", "export GITHUB_TOKEN=abcdef123456", "abcdef123456"},
-		{"Anthropic key", "key sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234", "sk-ant-api03"},
-		{"OpenAI key", "OPENAI sk-proj-abcdefghijklmnopqrstuvwxyz1234", "sk-proj-abcdefgh"},
-		{"Google key", "AIzaSyA1234567890abcdefghijklmnopqrstuv", "AIzaSyA1234"},
-		{"xAI key", "xai-abcdefghijklmnopqrstuvwx", "xai-abcdefgh"},
+		{"Anthropic key", "key sk-ant-" + "api03-abcdefghijklmnopqrstuvwxyz1234", "sk-ant-" + "api03"},
+		{"OpenAI key", "OPENAI sk-proj-" + "abcdefghijklmnopqrstuvwxyz1234", "sk-proj-" + "abcdefgh"},
+		{"Google key", "AIzaSy" + "A1234567890abcdefghijklmnopqrstuv", "AIzaSy" + "A1234"},
+		{"xAI key", "xai-" + "abcdefghijklmnopqrstuvwx", "xai-" + "abcdefgh"},
 		{"bearer header", "Authorization: Bearer abcdefghij0123456789", "abcdefghij0123456789"},
 		{"basic header", "authorization=Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"},
 		{"bare bearer", "sent Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig", "eyJhbGciOiJIUzI1NiJ9"},
 		{"api_key assignment", "api_key: s3cr3t-value", "s3cr3t-value"},
 		{"quoted password", `password = "hunter2hunter2"`, "hunter2hunter2"},
 		{"JSON api key", `{"providers":{"x":{"api_key":"mistral-0123456789"}}}`, "mistral-0123456789"},
-		{"AWS key id", "AKIAABCDEFGHIJKLMNOP", "AKIAABCDEFGH"},
+		{"AWS key id", "AKIA" + "ABCDEFGHIJKLMNOP", "AKIA" + "ABCDEFGH"},
 	}
 	for _, tc := range secretCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -69,7 +69,7 @@ func TestMaskerKeepsContext(t *testing.T) {
 	if got, want := m.Mask("Authorization: Bearer abcdefgh12345678"), "Authorization: Bearer "+maskText; got != want {
 		t.Errorf("header = %q, want %q", got, want)
 	}
-	if got, want := m.Mask("GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789 gh pr view"), "GH_TOKEN="+maskText+" gh pr view"; got != want {
+	if got, want := m.Mask("GH_TOKEN=ghp_"+"abcdefghijklmnopqrstuvwxyz0123456789 gh pr view"), "GH_TOKEN="+maskText+" gh pr view"; got != want {
 		t.Errorf("assignment = %q, want %q", got, want)
 	}
 }

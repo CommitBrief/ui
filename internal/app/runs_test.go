@@ -302,8 +302,8 @@ func TestAPanickingKindFailsTheTaskNotTheApp(t *testing.T) {
 
 func TestLogsAreMasked(t *testing.T) {
 	kind := &fakeKind{exec: func(_ context.Context, _ run.Task, progress func(string)) (run.Outcome, error) {
-		progress("GH_TOKEN=ghp_abcdefghijklmnopqrstuvwxyz0123456789")
-		progress("using key sk-ant-api03-abcdefghijklmnopqrstuvwxyz")
+		progress("GH_TOKEN=ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789")
+		progress("using key sk-ant-" + "api03-abcdefghijklmnopqrstuvwxyz")
 		progress("Authorization: Bearer abcdefgh12345678")
 		progress("input_tokens: 4231")
 		return okOutcome(), nil
@@ -317,7 +317,7 @@ func TestLogsAreMasked(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"ghp_abcdef", "sk-ant-api03", "abcdefgh12345678"} {
+	for _, secret := range []string{"ghp_" + "abcdef", "sk-ant-" + "api03", "abcdefgh12345678"} {
 		if strings.Contains(string(raw), secret) {
 			t.Errorf("the log file contains %q:\n%s", secret, raw)
 		}
