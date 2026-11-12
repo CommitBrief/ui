@@ -35,6 +35,9 @@ type State struct {
 	// Schedules serves the scheduled-bot screen. Its scheduler is started and
 	// stopped by the composition root, not by the shell.
 	Schedules *app.Schedules
+	// Updates serves the Updates screen. Its periodic check is started and
+	// stopped by the composition root, not by the shell.
+	Updates *app.Updates
 	// Close releases the database and the data-directory lock.
 	Close func() error
 }
@@ -133,6 +136,7 @@ func Run(opts Options) error {
 	app.RegisterService(application.NewService(NewSettingsService(state.Settings, logger)))
 	app.RegisterService(application.NewService(NewJobsService(state.Jobs, logger)))
 	app.RegisterService(application.NewService(NewSchedulesService(state.Schedules, logger)))
+	app.RegisterService(application.NewService(NewUpdatesService(state.Updates, logger)))
 
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   mainWindowName,

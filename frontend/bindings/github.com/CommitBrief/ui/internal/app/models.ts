@@ -16,6 +16,9 @@ import * as schedule$0 from "../domain/schedule/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as settings$0 from "../domain/settings/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as update$0 from "../domain/update/models.js";
 
 /**
  * BotJobInput is a bot job as the user edits it. ID 0 creates a job.
@@ -378,4 +381,28 @@ export interface TaskStatusEvent {
     "taskId": number;
     "status": run$0.Status;
     "errorCode": errcode$0.Code;
+}
+
+/**
+ * UpdatesView is what the Updates screen shows: the updater's state and the
+ * user's preferences.
+ */
+export interface UpdatesView {
+    "status": update$0.Status;
+
+    /**
+     * Channel is "stable" or "prerelease".
+     */
+    "channel": string;
+
+    /**
+     * AutoCheck is whether the application looks for updates once a day.
+     */
+    "autoCheck": boolean;
+
+    /**
+     * LastCheck is when the last successful check finished; null before the
+     * first one.
+     */
+    "lastCheck": string | null;
 }

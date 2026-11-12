@@ -6,10 +6,12 @@ import * as JobsService from "./jobsservice.js";
 import * as ReposService from "./reposservice.js";
 import * as SchedulesService from "./schedulesservice.js";
 import * as SettingsService from "./settingsservice.js";
+import * as UpdatesService from "./updatesservice.js";
 export {
     HealthService,
     JobsService,
     ReposService,
     SchedulesService,
-    SettingsService
+    SettingsService,
+    UpdatesService
 };

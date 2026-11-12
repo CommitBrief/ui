@@ -18,7 +18,7 @@ GO_LICENSES_VERSION := v1.6.0
 FRONTEND_SRC := $(shell find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json frontend/package-lock.json frontend/bindings internal/adapter/desktop/csp.txt -type f 2>/dev/null)
 
 .PHONY: help tools wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean \
-	license-check spdx-check i18n-check bindings-check \
+	license-check spdx-check i18n-check bindings-check release-check \
 	frontend-deps frontend-build frontend-check check
 
 help: ## Show this help
@@ -70,15 +70,15 @@ lint-selftest: frontend-build ## Prove every depguard/forbidigo layering rule st
 	bash scripts/depguard-selftest.sh
 
 fmt: ## Format Go source with gofmt (+ goimports if available)
-	gofmt -s -w *.go cmd internal
+	gofmt -s -w *.go cmd internal scripts
 	@if command -v goimports >/dev/null 2>&1; then \
-		goimports -w -local $(PKG) *.go cmd internal ; \
+		goimports -w -local $(PKG) *.go cmd internal scripts ; \
 	else \
 		echo "goimports not installed (go install golang.org/x/tools/cmd/goimports@latest)"; \
 	fi
 
 fmt-check:
-	@drift=$$(gofmt -l -s *.go cmd internal || true); \
+	@drift=$$(gofmt -l -s *.go cmd internal scripts || true); \
 	if [ -n "$$drift" ]; then \
 		echo "gofmt: needs '-s -w' on:"; echo "$$drift"; exit 1; \
 	fi
@@ -110,6 +110,15 @@ bindings-check: wails3-check frontend-deps ## Fail if committed Wails bindings d
 		echo "bindings drift: run 'wails3 generate bindings -clean=true -ts -i $(GO_PKGS)' and commit"; exit 1; \
 	fi
 
+release-check: ## Self-test the release tooling (checksum signing, version stamping) and lint the workflows
+	$(GO) run scripts/sign-checksums.go selftest
+	bash scripts/stamp-version.sh --selftest
+	@if command -v actionlint >/dev/null 2>&1; then \
+		actionlint .github/workflows/*.yml && echo "ok:   actionlint"; \
+	else \
+		echo "actionlint not installed; workflow lint skipped (CI pins nothing for it; install from https://github.com/rhysd/actionlint)"; \
+	fi
+
 frontend-check: frontend-deps ## Frontend lint + typecheck
 	cd frontend && npm run lint
 	cd frontend && npm run typecheck
@@ -137,4 +146,6 @@ check: ## Run every guard CI runs
 	@$(MAKE) -s frontend-check
 	@echo "==> bindings-check"
 	@$(MAKE) -s bindings-check
+	@echo "==> release-check"
+	@$(MAKE) -s release-check
 	@echo "==> all checks passed"

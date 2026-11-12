@@ -165,6 +165,11 @@ func compose(x port.Notification) (id, title, body string, ok bool) {
 			"Daily budget reached",
 			fmt.Sprintf("Spent $%.2f of $%.2f today. No new reviews start until tomorrow.", x.SpentUSD, x.BudgetUSD),
 			true
+	case port.NotifyUpdateAvailable:
+		return "commitbrief-ui-update-" + x.Version,
+			"Update available",
+			fmt.Sprintf("CommitBrief UI %s is ready to install. Open the Updates screen to install it.", x.Version),
+			true
 	}
 	return "", "", "", false
 }

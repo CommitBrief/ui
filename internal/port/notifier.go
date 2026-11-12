@@ -9,8 +9,8 @@ import (
 )
 
 // NotificationKind says why the user is told something. The UI notifies for
-// exactly three reasons (phase 12): a review found something, a run failed,
-// and the daily budget is spent.
+// exactly four reasons: a review found something, a run failed, the daily
+// budget is spent, and an update of the application itself is available.
 type NotificationKind string
 
 const (
@@ -21,6 +21,9 @@ const (
 	// NotifyBudgetExceeded: the daily cost budget is spent; no new task starts
 	// until tomorrow.
 	NotifyBudgetExceeded NotificationKind = "budget_exceeded"
+	// NotifyUpdateAvailable: the signed release feed offers a newer version of
+	// CommitBrief UI. Nothing is installed until the user confirms.
+	NotifyUpdateAvailable NotificationKind = "update_available"
 )
 
 // Notification is what the scheduler wants the user to know. It carries facts,
@@ -42,6 +45,9 @@ type Notification struct {
 	// BudgetUSD and SpentUSD describe a NotifyBudgetExceeded.
 	BudgetUSD float64
 	SpentUSD  float64
+	// Version is the offered version of a NotifyUpdateAvailable (a validated
+	// semantic version).
+	Version string
 }
 
 // Notifier delivers a notification to the user (a native desktop notification).

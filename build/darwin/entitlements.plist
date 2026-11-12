@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements the release workflow signs the app with (hardened runtime, which
+  notarization requires). The set is deliberately empty: a Go binary needs no
+  JIT or unsigned-memory exception, and the web content runs in WebKit's own
+  processes. Add a key only when a notarized build is shown to need it, with the
+  reason next to it.
+-->
+<plist version="1.0">
+    <dict/>
+</plist>

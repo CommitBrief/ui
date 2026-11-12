@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"runtime"
 	"time"
@@ -21,11 +22,19 @@ import (
 	"github.com/CommitBrief/ui/internal/adapter/gitinfo"
 	"github.com/CommitBrief/ui/internal/adapter/notify"
 	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
+	"github.com/CommitBrief/ui/internal/adapter/updater"
 	"github.com/CommitBrief/ui/internal/app"
 	"github.com/CommitBrief/ui/internal/app/jobkinds"
 	"github.com/CommitBrief/ui/internal/domain/settings"
+	"github.com/CommitBrief/ui/internal/domain/update"
 	"github.com/CommitBrief/ui/internal/platform"
+	"github.com/CommitBrief/ui/internal/port"
 )
+
+// version is the release version of this build, stamped at build time
+// (-ldflags "-X main.version=1.2.3", see the release workflow). A build without
+// the stamp reports update.DevVersion and never updates itself.
+var version = update.DevVersion
 
 const (
 	// dbFileName is the UI database inside the OS config directory (UI-0006).
@@ -143,11 +152,18 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 	})
 	scheduler.Start(context.Background())
 
+	// The self-update checks once a day (when the user leaves it on) and starts
+	// after the launch has settled; like the scheduler it stops before the state
+	// closes.
+	updates := newUpdates(store, notifier, clock, dirs, logger)
+	updates.Start(context.Background())
+
 	return desktop.State{
 		Repos:    app.NewRepos(store.Repos(), store, gitinfo.New()),
 		Health:   app.NewHealth(store),
 		Settings: settingsSvc,
 		Jobs:     runs,
+		Updates:  updates,
 		Schedules: app.NewSchedules(app.SchedulesDeps{
 			Jobs:      store.Jobs(),
 			Runner:    runs,
@@ -160,6 +176,7 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 			// Stop scheduling first, then the running reviews (their CLI
 			// process trees die with their context), then let go of the
 			// database.
+			updates.Stop()
 			scheduler.Stop()
 			// A notification still waiting behind a permission dialog is let go
 			// after a moment; quitting never waits for the dialog.
@@ -172,6 +189,68 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		},
 	}, nil
 }
+
+// newUpdates builds the self-update: the signed GitHub release feed, the Wails
+// swap-and-restart backend and the use cases on top. Where the application cannot
+// replace itself (a package-manager install, a development build, a read-only
+// location) the updater is delegated: it checks nothing and installs nothing.
+// Without a release public key compiled in, every check fails closed.
+func newUpdates(store *sqlite.Store, notifier port.Notifier, clock platform.SystemClock, dirs platform.Dirs, logger *slog.Logger) *app.Updates {
+	info := platform.InstallInfo{Delegation: update.DelegationUnsupported}
+	if exe, err := os.Executable(); err == nil {
+		info = platform.DetectInstall(runtime.GOOS, exe, os.Getenv, platform.DirWritable)
+	} else {
+		logger.Warn("locating the running executable failed; self-update is off", "error", err)
+	}
+	if info.Delegation == update.DelegationNone && !platform.ShipsReleaseFor(runtime.GOOS, runtime.GOARCH) {
+		// No release artefact is built for this system, so there is nothing to
+		// update to.
+		info = platform.InstallInfo{Delegation: update.DelegationUnsupported}
+	}
+
+	keys, err := updater.ReleasePublicKeys()
+	if err != nil {
+		// Not fatal: the application works, only updating is refused.
+		if errors.Is(err, updater.ErrKeyMissing) {
+			logger.Info("no release public key is compiled in; updates are refused")
+		} else {
+			logger.Error("the compiled-in release public key is unusable; updates are refused", "error", err)
+		}
+		keys = nil
+	}
+
+	engine := updater.New(updater.Config{
+		Feed: updater.NewSource(updater.SourceConfig{
+			PublicKeys: keys,
+			GOOS:       runtime.GOOS,
+			GOARCH:     runtime.GOARCH,
+			Suffix:     platform.ArtifactSuffix(info.Kind),
+			Version:    version,
+		}),
+		Backend:    desktop.NewUpdateBackend(version, logger),
+		Current:    version,
+		Delegation: info.Delegation,
+		StagingDir: filepath.Join(dirs.Data, updatesDirName),
+		Observer: func(st update.Status) {
+			desktop.NewEventEmitter().Emit(app.EventUpdateStatus, st)
+		},
+		Logger: logger,
+	})
+	if err := engine.CleanStaging(); err != nil {
+		logger.Warn("removing an interrupted update download failed", "error", err)
+	}
+	return app.NewUpdates(app.UpdatesDeps{
+		Updater:  engine,
+		Settings: store.Settings(),
+		Clock:    clock,
+		Notifier: notifier,
+		Logger:   logger,
+	})
+}
+
+// updatesDirName is the staging directory of update downloads inside the data
+// directory.
+const updatesDirName = "updates"
 
 // runsShutdownGrace is how long quitting waits for running reviews to stop. The
 // CLI adapter's own SIGTERM-to-SIGKILL window is 5 seconds.

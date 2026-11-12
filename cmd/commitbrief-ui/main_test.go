@@ -16,6 +16,7 @@ import (
 
 	"github.com/CommitBrief/ui/internal/adapter/store/sqlite"
 	"github.com/CommitBrief/ui/internal/app"
+	"github.com/CommitBrief/ui/internal/domain/update"
 	"github.com/CommitBrief/ui/internal/platform"
 	"github.com/CommitBrief/ui/internal/port"
 )
@@ -236,5 +237,23 @@ func TestOpenStateStartsEmptyOnADamagedDatabaseAndSignalsIt(t *testing.T) {
 	defer func() { _ = next.Close() }()
 	if n := next.Health.DatabaseRecovery(); n != nil {
 		t.Errorf("an acknowledged recovery was reported again: %+v", n)
+	}
+}
+
+// A build without a release stamp must report the development version, which
+// disables the self-update; the build/*/Taskfile.yml default for APP_VERSION
+// spells the same string.
+func TestUnstampedBuildIsADevelopmentBuild(t *testing.T) {
+	if version != update.DevVersion || !update.IsDevBuild(version) {
+		t.Errorf("version = %q, want the development version %q", version, update.DevVersion)
+	}
+	for _, f := range []string{"darwin", "linux", "windows"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "build", f, "Taskfile.yml"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), `default "`+update.DevVersion+`"`) {
+			t.Errorf("build/%s/Taskfile.yml does not default APP_VERSION to %s", f, update.DevVersion)
+		}
 	}
 }

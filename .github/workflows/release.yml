@@ -1,0 +1,736 @@
+name: Release
+
+# Builds, signs and publishes CommitBrief UI for macOS, Windows and Linux when a
+# version tag (v*) is pushed (UI-0007, UI-0009). Signing is not optional:
+#
+#   * a tag run FAILS, before anything is published, when any signing secret is
+#     missing (a release is signed from the first one, UI-0009 section 1), when
+#     internal/adapter/updater/release_key.pub holds no key, or when the update
+#     private key does not belong to that public key;
+#   * a manual run (workflow_dispatch) is a dry run: it builds and packages what
+#     it can, never signs (whatever secrets exist), says loudly (::warning:: and
+#     an "-UNSIGNED" artifact name) that it did not, and never publishes. Code
+#     from an arbitrary branch is therefore never signed with the real
+#     certificates.
+#
+# The signing secrets belong to the GitHub environment "release" (Settings >
+# Environments), whose deployment rule allows version tags (v*) only; repository
+# level secrets would be readable by any workflow on any branch. Only tag runs
+# enter that environment (the jobs below name it conditionally).
+#
+# Secrets (the maintainer provides them; this file only names them):
+#   macOS    APPLE_DEVELOPER_ID_P12 (base64 of the Developer ID Application .p12),
+#            APPLE_DEVELOPER_ID_PASSWORD, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER,
+#            APPLE_NOTARY_KEY (the App Store Connect API key, the .p8 text)
+#   Windows  WINDOWS_SIGNING_PFX (base64 of the Authenticode .pfx),
+#            WINDOWS_SIGNING_PASSWORD; optional WINDOWS_SIGNING_TIMESTAMP_URL
+#   Linux    LINUX_PGP_KEY (ASCII-armored private key), LINUX_PGP_PASSPHRASE
+#   Updater  UPDATE_ED25519_PRIVATE_KEY (base64 seed from `sign-checksums.go keygen`)
+# docs/RELEASING.md describes how to create and rotate them.
+#
+# Third-party actions are pinned to a commit SHA (the tag is in the comment), as
+# in ci.yml. Bump them deliberately.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  meta:
+    name: Plan the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      prerelease: ${{ steps.plan.outputs.prerelease }}
+      publish: ${{ steps.plan.outputs.publish }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Work out the version
+        id: plan
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if [ "$EVENT" = push ]; then
+            version="${REF_NAME#v}"
+            publish=true
+          else
+            version="0.0.0-dryrun.${RUN_NUMBER}"
+            publish=false
+          fi
+          if ! [[ "$version" =~ $semver ]]; then
+            echo "::error::'$REF_NAME' is not a version tag (vMAJOR.MINOR.PATCH[-prerelease])"
+            exit 1
+          fi
+          prerelease=false
+          case "$version" in *-*) prerelease=true ;; esac
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Release plan: version=$version prerelease=$prerelease publish=$publish"
+
+      - name: The tagged commit must be on main
+        if: steps.plan.outputs.publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not on main; release from main only"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      # Fail before the 40-minute builds, not after: the update key must be
+      # committed and the secret must be its private half. The check signs a
+      # sample with the secret and verifies it against release_key.pub, exactly
+      # as the final signing step will.
+      - name: Check the update signing key
+        if: steps.plan.outputs.publish == 'true'
+        shell: bash
+        env:
+          UPDATE_ED25519_PRIVATE_KEY: ${{ secrets.UPDATE_ED25519_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_ED25519_PRIVATE_KEY:-}" ]; then
+            echo "::error::the UPDATE_ED25519_PRIVATE_KEY secret is not set; an unsigned update feed is never published"
+            exit 1
+          fi
+          sample="$RUNNER_TEMP/sample-checksums.txt"
+          printf '%s  commitbrief-ui_0.0.0_linux_amd64.AppImage\n' "$(printf sample | sha256sum | cut -d' ' -f1)" > "$sample"
+          go run scripts/sign-checksums.go sign -in "$sample" -out "$sample.sig"
+          go run scripts/sign-checksums.go verify -in "$sample" -sig "$sample.sig"
+          rm -f "$sample" "$sample.sig"
+
+      - name: Self-test the release tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          go run scripts/sign-checksums.go selftest
+          bash scripts/stamp-version.sh --selftest
+
+  macos:
+    name: macOS (universal)
+    needs: meta
+    runs-on: macos-latest
+    timeout-minutes: 90
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    outputs:
+      signed: ${{ steps.preflight.outputs.signed }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PUBLISH: ${{ needs.meta.outputs.publish }}
+      APP_VERSION: ${{ needs.meta.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Check the signing secrets
+        id: preflight
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          # A dry run (manual dispatch) never signs, even when secrets exist.
+          if [ "$PUBLISH" != true ]; then
+            echo "::warning::UNSIGNED dry-run build: macOS signing is skipped on a manual run. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          for name in APPLE_DEVELOPER_ID_P12 APPLE_DEVELOPER_ID_PASSWORD APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER APPLE_NOTARY_KEY; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            if [ "$PUBLISH" = true ]; then
+              echo "::error::macOS signing secrets missing:$missing. A release is signed and notarized from the first one (UI-0009); nothing was published."
+              exit 1
+            fi
+            echo "::warning::UNSIGNED dry-run build: macOS signing secrets missing:$missing. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install pinned tools (wails3)
+        run: |
+          make tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Stamp the version
+        run: bash scripts/stamp-version.sh "$VERSION"
+
+      - name: Build the universal app bundle
+        run: |
+          set -euo pipefail
+          (cd frontend && npm ci)
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          wails3 task darwin:package:universal
+          rm -rf "bin/CommitBrief UI.app"
+          mv bin/commitbrief-ui.app "bin/CommitBrief UI.app"
+          lipo -info "bin/CommitBrief UI.app/Contents/MacOS/commitbrief-ui"
+
+      - name: Sign with the Developer ID certificate
+        id: sign
+        if: steps.preflight.outputs.signed == 'true'
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/release-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/developer-id.p12"
+          security import "$RUNNER_TEMP/developer-id.p12" -P "$APPLE_DEVELOPER_ID_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm -f "$RUNNER_TEMP/developer-id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          keychains=("$keychain")
+          while IFS= read -r existing; do
+            existing="${existing//\"/}"
+            existing="${existing#"${existing%%[![:space:]]*}"}"
+            if [ -n "$existing" ]; then keychains+=("$existing"); fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "${keychains[@]}"
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk '/Developer ID Application/ {print $2; exit}')"
+          if [ -z "$identity" ]; then
+            echo "::error::no 'Developer ID Application' identity in the imported certificate"
+            exit 1
+          fi
+          echo "keychain=$keychain" >> "$GITHUB_OUTPUT"
+          echo "identity=$identity" >> "$GITHUB_OUTPUT"
+          codesign --force --options runtime --timestamp \
+            --entitlements build/darwin/entitlements.plist \
+            --sign "$identity" "bin/CommitBrief UI.app"
+          codesign --verify --strict --deep --verbose=2 "bin/CommitBrief UI.app"
+          codesign -dvv "bin/CommitBrief UI.app" 2>&1 | grep -E "Authority|flags|TeamIdentifier"
+
+      - name: Notarize and staple
+        if: steps.preflight.outputs.signed == 'true'
+        env:
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/notary-key.p8"
+          printf '%s\n' "$APPLE_NOTARY_KEY" > "$key"
+          chmod 600 "$key"
+          ditto -c -k --keepParent "bin/CommitBrief UI.app" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER" \
+            --wait --timeout 40m
+          rm -f "$key" "$RUNNER_TEMP/notarize.zip"
+          xcrun stapler staple "bin/CommitBrief UI.app"
+          xcrun stapler validate "bin/CommitBrief UI.app"
+          # What a user's Mac will say: accepted, Notarized Developer ID.
+          spctl -a -vv -t exec "bin/CommitBrief UI.app" 2>&1 | tee "$RUNNER_TEMP/spctl.txt"
+          grep -q "Notarized Developer ID" "$RUNNER_TEMP/spctl.txt"
+
+      - name: Package the update archive and the disk image
+        env:
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          SIGNED: ${{ steps.preflight.outputs.signed }}
+          IDENTITY: ${{ steps.sign.outputs.identity }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base="commitbrief-ui_${VERSION}_darwin_universal"
+          # The update archive: a zip with exactly one top-level entry, the
+          # signed and notarized .app (what the in-app updater unpacks).
+          ditto -c -k --keepParent "bin/CommitBrief UI.app" "dist/${base}.zip"
+          # The disk image for a first install.
+          stage="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$stage" && mkdir -p "$stage"
+          cp -R "bin/CommitBrief UI.app" "$stage/"
+          ln -s /Applications "$stage/Applications"
+          hdiutil create -volname "CommitBrief UI" -srcfolder "$stage" -ov -format UDZO "dist/${base}.dmg"
+          if [ "$SIGNED" = true ]; then
+            codesign --force --timestamp --sign "$IDENTITY" "dist/${base}.dmg"
+            key="$RUNNER_TEMP/notary-key.p8"
+            printf '%s\n' "$APPLE_NOTARY_KEY" > "$key"
+            chmod 600 "$key"
+            xcrun notarytool submit "dist/${base}.dmg" \
+              --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER" \
+              --wait --timeout 40m
+            rm -f "$key"
+            xcrun stapler staple "dist/${base}.dmg"
+          fi
+          ls -l dist
+
+      - name: Remove the signing keychain
+        if: always() && steps.sign.outputs.keychain != ''
+        env:
+          KEYCHAIN: ${{ steps.sign.outputs.keychain }}
+        run: security delete-keychain "$KEYCHAIN" || true
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: dist-macos${{ steps.preflight.outputs.signed == 'true' && '' || '-UNSIGNED' }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  windows:
+    name: Windows (amd64)
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 60
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    outputs:
+      signed: ${{ steps.preflight.outputs.signed }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PUBLISH: ${{ needs.meta.outputs.publish }}
+      APP_VERSION: ${{ needs.meta.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Check the signing secrets
+        id: preflight
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # A dry run (manual dispatch) never signs, even when secrets exist.
+          if [ "$PUBLISH" != true ]; then
+            echo "::warning::UNSIGNED dry-run build: Windows signing is skipped on a manual run. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          for name in WINDOWS_SIGNING_PFX WINDOWS_SIGNING_PASSWORD; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            if [ "$PUBLISH" = true ]; then
+              echo "::error::Windows signing secrets missing:$missing. A release is Authenticode-signed from the first one (UI-0009); nothing was published."
+              exit 1
+            fi
+            echo "::warning::UNSIGNED dry-run build: Windows signing secrets missing:$missing. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # NSIS builds the installer that is then Authenticode-signed, so it is
+      # pinned to an exact version (docs/RELEASING.md, "Pinned inputs"); bump
+      # these deliberately. Chocolatey verifies each package's own checksums.
+      - name: Install make and NSIS (pinned)
+        shell: pwsh
+        run: |
+          choco install nsis --version=3.11.0 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'choco could not install NSIS 3.11.0' }
+          choco install make --version=4.4.1 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'choco could not install make 4.4.1' }
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files (x86)\NSIS'
+          $nsis = (& 'C:\Program Files (x86)\NSIS\makensis.exe' /VERSION).Trim()
+          Write-Host "makensis $nsis"
+          if ($nsis -ne 'v3.11') { throw "expected makensis v3.11, got $nsis" }
+
+      - name: Install pinned tools (wails3)
+        run: |
+          make tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Stamp the version
+        run: bash scripts/stamp-version.sh "$VERSION"
+
+      - name: Build the executable
+        run: |
+          set -euo pipefail
+          (cd frontend && npm ci)
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          ARCH=amd64 wails3 task windows:build
+          ls -l bin
+
+      - name: Sign the executable
+        if: steps.preflight.outputs.signed == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $pfx = Join-Path $env:RUNNER_TEMP 'authenticode.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX))
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw 'signtool.exe was not found on the runner' }
+          $timestamp = if ($env:WINDOWS_SIGNING_TIMESTAMP_URL) { $env:WINDOWS_SIGNING_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_SIGNING_PASSWORD /fd sha256 /tr $timestamp /td sha256 /d 'CommitBrief UI' bin\commitbrief-ui.exe
+          if ($LASTEXITCODE -ne 0) { throw 'signtool failed on the executable' }
+          $status = (Get-AuthenticodeSignature bin\commitbrief-ui.exe).Status
+          Write-Host "Authenticode status of the executable: $status"
+          if ($status -ne 'Valid') { throw "the executable's signature is $status, not Valid" }
+          "SIGNTOOL=$($signtool.FullName)" | Add-Content -Path $env:GITHUB_ENV
+          "PFX_PATH=$pfx" | Add-Content -Path $env:GITHUB_ENV
+
+      - name: Build the per-user installer
+        working-directory: build/windows/nsis
+        run: |
+          set -euo pipefail
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          wails3 generate webview2bootstrapper -dir .
+          core="${VERSION%%-*}"
+          makensis -DWAILS_INSTALL_SCOPE=user -DREQUEST_EXECUTION_LEVEL=user \
+            -DINFO_PRODUCTVERSION="$core" \
+            -DARG_WAILS_AMD64_BINARY="$(cygpath -w "$GITHUB_WORKSPACE/bin/commitbrief-ui.exe")" \
+            project.nsi
+          ls -l ../../../bin
+
+      - name: Sign the installer
+        if: steps.preflight.outputs.signed == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
+          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $timestamp = if ($env:WINDOWS_SIGNING_TIMESTAMP_URL) { $env:WINDOWS_SIGNING_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
+          $installer = 'bin\commitbrief-ui-amd64-installer.exe'
+          & $env:SIGNTOOL sign /f $env:PFX_PATH /p $env:WINDOWS_SIGNING_PASSWORD /fd sha256 /tr $timestamp /td sha256 /d 'CommitBrief UI installer' $installer
+          if ($LASTEXITCODE -ne 0) { throw 'signtool failed on the installer' }
+          $status = (Get-AuthenticodeSignature $installer).Status
+          Write-Host "Authenticode status of the installer: $status"
+          if ($status -ne 'Valid') { throw "the installer's signature is $status, not Valid" }
+          Remove-Item -Force $env:PFX_PATH
+
+      - name: Package the update archive and the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $base = "commitbrief-ui_$($env:VERSION)_windows_amd64"
+          # The update archive: a zip with exactly one top-level entry, the
+          # signed executable (what the in-app updater unpacks).
+          Compress-Archive -Path bin\commitbrief-ui.exe -DestinationPath "dist\$base.zip"
+          Copy-Item bin\commitbrief-ui-amd64-installer.exe "dist\$base-setup.exe"
+          Get-ChildItem dist
+
+      - name: Remove the certificate file
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:PFX_PATH -and (Test-Path $env:PFX_PATH)) { Remove-Item -Force $env:PFX_PATH }
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: dist-windows${{ steps.preflight.outputs.signed == 'true' && '' || '-UNSIGNED' }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  linux:
+    name: Linux (amd64)
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: ${{ github.event_name == 'push' && 'release' || '' }}
+    outputs:
+      signed: ${{ steps.preflight.outputs.signed }}
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PUBLISH: ${{ needs.meta.outputs.publish }}
+      APP_VERSION: ${{ needs.meta.outputs.version }}
+      # linuxdeploy builds the AppImage. It is pinned to a release and checked
+      # against this digest (GitHub's published digest of the release asset)
+      # before it runs; Wails would otherwise fetch the moving "continuous" build.
+      LINUXDEPLOY_URL: https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+      LINUXDEPLOY_SHA256: c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Check the signing secrets
+        id: preflight
+        env:
+          LINUX_PGP_KEY: ${{ secrets.LINUX_PGP_KEY }}
+          LINUX_PGP_PASSPHRASE: ${{ secrets.LINUX_PGP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          # A dry run (manual dispatch) never signs, even when secrets exist.
+          if [ "$PUBLISH" != true ]; then
+            echo "::warning::UNSIGNED dry-run build: Linux signing is skipped on a manual run. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          missing=""
+          for name in LINUX_PGP_KEY LINUX_PGP_PASSPHRASE; do
+            [ -n "${!name:-}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            if [ "$PUBLISH" = true ]; then
+              echo "::error::Linux signing secrets missing:$missing. A release signs its deb and rpm from the first one (UI-0009); nothing was published."
+              exit 1
+            fi
+            echo "::warning::UNSIGNED dry-run build: Linux signing secrets missing:$missing. The artifact is named -UNSIGNED and cannot be published."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev libfuse2t64 desktop-file-utils rpm
+
+      - name: Install pinned tools (wails3)
+        run: |
+          make tools
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Stamp the version
+        run: bash scripts/stamp-version.sh "$VERSION"
+
+      - name: Build the binary
+        run: |
+          set -euo pipefail
+          (cd frontend && npm ci)
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          wails3 task linux:build
+          ls -l bin
+
+      - name: Build the AppImage
+        run: |
+          set -euo pipefail
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          builddir=build/linux/appimage/build
+          mkdir -p "$builddir"
+          curl -fsSL --retry 3 -o "$builddir/linuxdeploy-x86_64.AppImage" "$LINUXDEPLOY_URL"
+          echo "$LINUXDEPLOY_SHA256  $builddir/linuxdeploy-x86_64.AppImage" | sha256sum -c -
+          chmod +x "$builddir/linuxdeploy-x86_64.AppImage"
+          # The binary is already built (and stamped); Wails finds the pinned
+          # linuxdeploy in the build directory and does not download another.
+          wails3 task linux:create:appimage
+          ls -l bin
+
+      - name: Build the deb and rpm packages
+        env:
+          GOARCH: amd64
+          GIT_COMMITTER_NAME: CommitBrief Release
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          wails3 task linux:generate:dotdesktop
+          wails3 tool package -name commitbrief-ui -format deb -config ./build/linux/nfpm/nfpm.yaml -out ./bin
+          wails3 tool package -name commitbrief-ui -format rpm -config ./build/linux/nfpm/nfpm.yaml -out ./bin
+          ls -l bin
+
+      - name: Sign the deb and rpm with PGP
+        if: steps.preflight.outputs.signed == 'true'
+        env:
+          LINUX_PGP_KEY: ${{ secrets.LINUX_PGP_KEY }}
+          LINUX_PGP_PASSPHRASE: ${{ secrets.LINUX_PGP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          gopath="$(go env GOPATH)"
+          export PATH="$gopath/bin:$PATH"
+          key="$RUNNER_TEMP/pgp-private.asc"
+          printf '%s\n' "$LINUX_PGP_KEY" > "$key"
+          chmod 600 "$key"
+          shopt -s nullglob
+          debs=(bin/*.deb)
+          rpms=(bin/*.rpm)
+          [ "${#debs[@]}" = 1 ] && [ "${#rpms[@]}" = 1 ] || { echo "::error::expected one deb and one rpm in bin/"; ls bin; exit 1; }
+          wails3 tool sign --input "${debs[0]}" --pgp-key "$key" --pgp-password "$LINUX_PGP_PASSPHRASE" --role builder
+          wails3 tool sign --input "${rpms[0]}" --pgp-key "$key" --pgp-password "$LINUX_PGP_PASSPHRASE"
+          # The public half goes out with the release so users can verify.
+          export GNUPGHOME="$RUNNER_TEMP/gnupg"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$LINUX_PGP_PASSPHRASE" | gpg --batch --pinentry-mode loopback --passphrase-fd 0 --import "$key"
+          rm -f "$key"
+          mkdir -p dist
+          gpg --armor --export > dist/commitbrief-ui-signing-key.asc
+          [ -s dist/commitbrief-ui-signing-key.asc ] || { echo "::error::could not export the public signing key"; exit 1; }
+          # Verify what was just signed.
+          rpmdb="$RUNNER_TEMP/rpmdb"
+          rpm --initdb --dbpath "$rpmdb"
+          rpm --dbpath "$rpmdb" --import dist/commitbrief-ui-signing-key.asc
+          rpm --dbpath "$rpmdb" -K "${rpms[0]}" | tee "$RUNNER_TEMP/rpm-k.txt"
+          grep -Eqi "signatures OK|pgp.*OK" "$RUNNER_TEMP/rpm-k.txt"
+          ar t "${debs[0]}" | tee "$RUNNER_TEMP/deb-members.txt"
+          grep -q "^_gpg" "$RUNNER_TEMP/deb-members.txt"
+          rm -rf "$GNUPGHOME"
+
+      - name: Collect the release files
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p dist
+          base="commitbrief-ui_${VERSION}_linux_amd64"
+          appimages=(bin/commitbrief-ui-*.AppImage)
+          debs=(bin/*.deb)
+          rpms=(bin/*.rpm)
+          [ "${#appimages[@]}" = 1 ] && [ "${#debs[@]}" = 1 ] && [ "${#rpms[@]}" = 1 ] || { echo "::error::expected one AppImage, one deb and one rpm in bin/"; ls bin; exit 1; }
+          cp "${appimages[0]}" "dist/${base}.AppImage"
+          cp "${debs[0]}" "dist/${base}.deb"
+          cp "${rpms[0]}" "dist/${base}.rpm"
+          # The tarball holds the bare binary as its only entry: it is what the
+          # in-app updater unpacks for a copy that is not an AppImage and not
+          # owned by a package manager.
+          tar -C bin -czf "dist/${base}.tar.gz" commitbrief-ui
+          ls -l dist
+
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: dist-linux${{ steps.preflight.outputs.signed == 'true' && '' || '-UNSIGNED' }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Sign the checksums and publish
+    needs: [meta, macos, windows, linux]
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: release
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Every platform must have been signed
+        shell: bash
+        env:
+          MACOS: ${{ needs.macos.outputs.signed }}
+          WINDOWS: ${{ needs.windows.outputs.signed }}
+          LINUX: ${{ needs.linux.outputs.signed }}
+        run: |
+          set -euo pipefail
+          for platform in MACOS WINDOWS LINUX; do
+            if [ "${!platform}" != true ]; then
+              echo "::error::the $platform build was not signed; refusing to publish"
+              exit 1
+            fi
+          done
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums, Ed25519 signature, release
+        shell: bash
+        env:
+          UPDATE_ED25519_PRIVATE_KEY: ${{ secrets.UPDATE_ED25519_PRIVATE_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          # Every artefact the updater may pick must be present.
+          for suffix in darwin_universal.zip darwin_universal.dmg windows_amd64.zip windows_amd64-setup.exe \
+                        linux_amd64.AppImage linux_amd64.tar.gz linux_amd64.deb linux_amd64.rpm; do
+            f="commitbrief-ui_${VERSION}_${suffix}"
+            [ -s "$f" ] || { echo "::error::$f is missing from the build output"; ls -l; exit 1; }
+          done
+          [ -s commitbrief-ui-signing-key.asc ] || { echo "::error::the public PGP key is missing from the build output"; exit 1; }
+          # One line per file, "<sha256>  <name>", sorted; checksums.txt itself
+          # and its signature are not listed.
+          rm -f checksums.txt checksums.txt.sig
+          sha256sum -- * | LC_ALL=C sort -k2 > checksums.txt
+          cat checksums.txt
+          cd ..
+          # Sign the exact bytes (the tool refuses a key that does not match
+          # release_key.pub), then verify as the application will.
+          go run scripts/sign-checksums.go sign -in dist/checksums.txt -out dist/checksums.txt.sig
+          go run scripts/sign-checksums.go verify -in dist/checksums.txt -sig dist/checksums.txt.sig
+          flags=()
+          if [ "$PRERELEASE" = true ]; then flags+=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "CommitBrief UI $VERSION" \
+            --generate-notes \
+            "${flags[@]}" \
+            dist/*

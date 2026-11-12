@@ -22,5 +22,6 @@ export type {
     ScheduledJob,
     TaskLogEvent,
     TaskLogView,
-    TaskStatusEvent
+    TaskStatusEvent,
+    UpdatesView
 } from "./models.js";

@@ -23,3 +23,8 @@ export const TaskLog = "task:log";
  */
 export const TaskStatus = "task:status";
 
+/**
+ * Name of the custom event "updates:status".
+ */
+export const UpdatesStatus = "updates:status";
+

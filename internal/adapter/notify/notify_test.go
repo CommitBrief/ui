@@ -39,7 +39,7 @@ func (r *recSender) sentSoFar() []sent {
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-func TestNotifyWordsTheThreeReasons(t *testing.T) {
+func TestNotifyWordsTheReasons(t *testing.T) {
 	s := &recSender{}
 	n := New(s, quiet)
 	ctx := context.Background()
@@ -49,6 +49,7 @@ func TestNotifyWordsTheThreeReasons(t *testing.T) {
 	n.Notify(ctx, port.Notification{Kind: port.NotifyRunFailed, RunID: 14, JobName: "Review requests", ErrorCode: errcode.Timeout})
 	n.Notify(ctx, port.Notification{Kind: port.NotifyRunFailed, RunID: 15, JobName: "Review requests", ErrorCode: errcode.GHNotAuthenticated, NeedsAttention: true})
 	n.Notify(ctx, port.Notification{Kind: port.NotifyBudgetExceeded, BudgetUSD: 5, SpentUSD: 5.036})
+	n.Notify(ctx, port.Notification{Kind: port.NotifyUpdateAvailable, Version: "0.2.0"})
 
 	want := []sent{
 		{"commitbrief-ui-findings-12", "New review findings", "Review requests: 5 findings in 2 pull requests."},
@@ -56,6 +57,7 @@ func TestNotifyWordsTheThreeReasons(t *testing.T) {
 		{"commitbrief-ui-failed-14", "Review run failed", "Review requests: a review timed out."},
 		{"commitbrief-ui-failed-15", "Review bot needs attention", "Review requests: GitHub CLI is not logged in. It will not run again until you resume it."},
 		{"commitbrief-ui-budget", "Daily budget reached", "Spent $5.04 of $5.00 today. No new reviews start until tomorrow."},
+		{"commitbrief-ui-update-0.2.0", "Update available", "CommitBrief UI 0.2.0 is ready to install. Open the Updates screen to install it."},
 	}
 	n.Close(ctx) // waits for the queue to be shown
 	got := s.sentSoFar()

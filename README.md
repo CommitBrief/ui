@@ -32,7 +32,7 @@ On Debian/Ubuntu: `sudo apt install build-essential pkg-config libgtk-4-dev libw
 make tools       # install wails3 (pinned) and go-licenses into $(go env GOPATH)/bin
 make dev         # run the app with hot reload
 make build       # produce bin/commitbrief-ui
-make check       # every gate CI runs: gofmt, vet, golangci-lint, tests, license, SPDX, i18n parity, frontend lint/typecheck, bindings drift
+make check       # every gate CI runs: gofmt, vet, golangci-lint, tests, license, SPDX, i18n parity, frontend lint/typecheck, bindings drift, release tooling self-test
 ```
 
 `make help` lists every target. Go code embeds `frontend/dist`, so the targets
@@ -52,6 +52,14 @@ frontend/                React + TypeScript + Vite
 
 Layer boundaries are enforced by `depguard` in `.golangci.yml`; see
 `make lint`.
+
+## Releases
+
+Tagged releases are built, signed (macOS Developer ID and notarization, Windows
+Authenticode, Linux PGP) and published by `.github/workflows/release.yml`; the app
+updates itself from them, checking an Ed25519 signature before anything is
+installed. The maintainer's runbook (secrets, test releases, key rotation, taking a
+release back) is [docs/RELEASING.md](docs/RELEASING.md).
 
 ## License
 

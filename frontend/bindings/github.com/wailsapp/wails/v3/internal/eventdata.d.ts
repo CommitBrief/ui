@@ -8,6 +8,9 @@ import type { Events } from "@wailsio/runtime";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import type * as app$0 from "../../../../CommitBrief/ui/internal/app/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import type * as update$0 from "../../../../CommitBrief/ui/internal/domain/update/models.js";
 
 declare module "@wailsio/runtime" {
     namespace Events {
@@ -15,6 +18,7 @@ declare module "@wailsio/runtime" {
             "run:status": app$0.RunStatusEvent;
             "task:log": app$0.TaskLogEvent;
             "task:status": app$0.TaskStatusEvent;
+            "updates:status": update$0.Status;
         }
     }
 }

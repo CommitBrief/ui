@@ -12,13 +12,16 @@ priority: "extra"
 maintainer: ${GIT_COMMITTER_NAME} <${GIT_COMMITTER_EMAIL}>
 description: "Desktop companion for the CommitBrief CLI"
 vendor: "CommitBrief"
-homepage: "https://wails.io"
-license: "MIT"
+homepage: "https://github.com/CommitBrief/ui"
+license: "GPL-3.0-or-later"
 release: "1"
 
 contents:
+  # /usr/bin, not /usr/local/bin: this is a package-manager install, which the
+  # application recognises by the path and leaves to the package manager to
+  # update (UI-0007 section 4).
   - src: "./bin/commitbrief-ui"
-    dst: "/usr/local/bin/commitbrief-ui"
+    dst: "/usr/bin/commitbrief-ui"
   - src: "./build/appicon.png"
     dst: "/usr/share/icons/hicolor/128x128/apps/commitbrief-ui.png"
   - src: "./build/linux/commitbrief-ui.desktop"
