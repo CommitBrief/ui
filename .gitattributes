@@ -5,3 +5,8 @@
 *.icns binary
 *.woff binary
 *.woff2 binary
+
+# Generated files (collapsed in diffs, excluded from language stats)
+go.sum linguist-generated
+frontend/package-lock.json linguist-generated
+frontend/bindings/** linguist-generated=true

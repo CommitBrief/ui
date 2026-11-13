@@ -36,3 +36,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Maintainer-private planning surface and local agent state: never commit
+/.ssot/
+.claude/

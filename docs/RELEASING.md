@@ -1,7 +1,7 @@
 # Releasing CommitBrief UI
 
 Releases are built, signed and published by `.github/workflows/release.yml` when a
-`v*` tag is pushed. This page is for the maintainer: what to prepare once, how to
+`v*.*.*` tag is pushed. This page is for the maintainer: what to prepare once, how to
 cut a test release, how to rotate certificates, and how to take a release back.
 
 Two things protect a release, and they do different jobs:
@@ -81,6 +81,10 @@ The workflow then runs: `meta` (checks the tag and that the commit is on `main`)
 the three platform builds in parallel, and `publish` (writes `checksums.txt`,
 creates the GitHub release with `prerelease: true` because the tag has a
 pre-release part).
+The release notes come from the matching `## [version]` section of `CHANGELOG.md`;
+a pre-release tag such as `v0.0.1-test.1` needs no section of its own and gets the
+fixed note "Test release, see [Unreleased]" instead, while a stable tag without a
+section stops the workflow before anything is built.
 
 Check the result on each system:
 

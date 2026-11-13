@@ -1,0 +1,42 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels: ["dependencies"]
+    groups:
+      github-actions-minor-patch:
+        update-types: ["minor", "patch"]
+
+  # Wails is pinned in three places that move together (go.mod, the
+  # @wailsio/runtime version and WAILS3_VERSION in the Makefile; UI-0001 section 1).
+  # Dependabot would bump only one of them, so a Wails upgrade stays a manual,
+  # deliberate change and is ignored here.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels: ["dependencies"]
+    ignore:
+      - dependency-name: "github.com/wailsapp/wails/v3"
+    groups:
+      dependencies-minor-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore(deps)"
+    labels: ["dependencies"]
+    ignore:
+      - dependency-name: "@wailsio/runtime"
+    groups:
+      dependencies-minor-patch:
+        update-types: ["minor", "patch"]

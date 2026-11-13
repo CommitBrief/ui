@@ -110,8 +110,9 @@ bindings-check: wails3-check frontend-deps ## Fail if committed Wails bindings d
 		echo "bindings drift: run 'wails3 generate bindings -clean=true -ts -i $(GO_PKGS)' and commit"; exit 1; \
 	fi
 
-release-check: ## Self-test the release tooling (version stamping) and lint the workflows
+release-check: ## Self-test the release tooling (version stamping, release notes) and lint the workflows
 	bash scripts/stamp-version.sh --selftest
+	bash scripts/release-notes.sh --selftest
 	@if command -v actionlint >/dev/null 2>&1; then \
 		actionlint .github/workflows/*.yml && echo "ok:   actionlint"; \
 	else \
