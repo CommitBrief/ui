@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In-app updates from GitHub Releases with Stable and Pre-release channels. An update is installed only if its SHA-256 matches `checksums.txt`.
 - Release workflow producing signed macOS and Linux packages and unsigned Windows packages (Windows SmartScreen shows an "unknown publisher" warning on the first run).
 - English and Turkish interface, design tokens, base components and the application shell.
+- The application and tray icons are now the CommitBrief mark instead of the Wails default.
 
 ### Security
 

@@ -17,7 +17,7 @@ GO_LICENSES_VERSION := v1.6.0
 
 FRONTEND_SRC := $(shell find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json frontend/package-lock.json frontend/bindings internal/adapter/desktop/csp.txt -type f 2>/dev/null)
 
-.PHONY: help tools tools-wails3 wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean \
+.PHONY: help tools tools-wails3 wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean icons \
 	license-check spdx-check i18n-check bindings-check release-check \
 	frontend-deps frontend-build frontend-check check check-lint check-test
 
@@ -63,6 +63,7 @@ test: frontend-build ## Run Go tests (default tags, then -tags production for th
 vet: frontend-build ## Run go vet (default and production tags)
 	$(GO) vet $(GO_PKGS)
 	$(GO) vet -tags production $(GO_PKGS)
+	$(GO) vet scripts/genicons.go
 
 lint: frontend-build ## Run golangci-lint (incl. depguard layering rules), default and production tags
 	golangci-lint run $(GO_PKGS)
@@ -72,7 +73,7 @@ lint-selftest: frontend-build ## Prove every depguard/forbidigo layering rule st
 	bash scripts/depguard-selftest.sh
 
 fmt: ## Format Go source with gofmt (+ goimports if available)
-	gofmt -s -w *.go cmd internal
+	gofmt -s -w *.go cmd internal scripts/genicons.go
 	@if command -v goimports >/dev/null 2>&1; then \
 		goimports -w -local $(PKG) *.go cmd internal ; \
 	else \
@@ -80,7 +81,7 @@ fmt: ## Format Go source with gofmt (+ goimports if available)
 	fi
 
 fmt-check:
-	@drift=$$(gofmt -l -s *.go cmd internal || true); \
+	@drift=$$(gofmt -l -s *.go cmd internal scripts/genicons.go || true); \
 	if [ -n "$$drift" ]; then \
 		echo "gofmt: needs '-s -w' on:"; echo "$$drift"; exit 1; \
 	fi
@@ -90,6 +91,10 @@ tidy: ## Sync go.mod / go.sum
 
 clean: ## Remove build artifacts
 	rm -rf bin frontend/dist
+
+icons: ## Redraw every icon (app, tray, installers) from build/appicon.svg; Assets.car too on macOS
+	$(GO) run scripts/genicons.go
+	@if [ "$$(uname -s)" = Darwin ]; then bash scripts/gen-assets-car.sh; else echo "icons: not macOS, build/darwin/Assets.car left as is"; fi
 
 license-check: ## Audit Go dependency licenses for GPL-3.0 compatibility
 	bash scripts/license-check.sh

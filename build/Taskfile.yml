@@ -154,17 +154,17 @@ tasks:
       - wails3 generate bindings -f '{{.BUILD_FLAGS}}' -clean=true{{if eq .OBFUSCATED "true"}} -obfuscated{{end}} -ts -i . ./cmd/... ./internal/...
 
   generate:icons:
-    summary: Generates Windows `.ico` and Mac `.icns` from an image; on macOS, `-iconcomposerinput appicon.icon -macassetdir darwin` also produces `Assets.car` from a `.icon` file (skipped on other platforms).
+    summary: No-op on purpose. The icons are committed and drawn from build/appicon.svg by `make icons` (scripts/genicons.go + scripts/gen-assets-car.sh)
+    desc: |
+      Wails' template regenerates icons.icns and icon.ico from appicon.png on
+      every build. That would overwrite the per-size renders committed here
+      (and make the Windows icon inherit the macOS margin), so the template
+      step is replaced by this no-op. Change the artwork in build/appicon.svg
+      and run `make icons`.
     run: once
-    dir: build
-    sources:
-      - "appicon.png"
-      - "appicon.icon"
-    generates:
-      - "darwin/icons.icns"
-      - "windows/icon.ico"
     cmds:
-      - wails3 generate icons -input appicon.png -macfilename darwin/icons.icns -windowsfilename windows/icon.ico -iconcomposerinput appicon.icon -macassetdir darwin
+      - cmd: echo "icons are committed (regenerate with make icons)"
+        silent: true
 
   dev:frontend:
     summary: Runs the frontend in development mode
