@@ -126,9 +126,10 @@ release-check: ## Self-test the release tooling (version stamping, release notes
 		echo "actionlint not installed; workflow lint skipped (CI pins nothing for it; install from https://github.com/rhysd/actionlint)"; \
 	fi
 
-frontend-check: frontend-deps ## Frontend lint + typecheck
+frontend-check: frontend-deps ## Frontend lint + typecheck + unit tests (Vitest)
 	cd frontend && npm run lint
 	cd frontend && npm run typecheck
+	cd frontend && npm test
 
 # CI runs these two targets as its "lint" and "test" jobs; `check` is the local
 # one-command gate and runs both, so no gate can exist in one but not the other.

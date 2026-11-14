@@ -55,6 +55,11 @@ export function Dialog({ open, onClose, title, description, children, footer }: 
       aria-labelledby={titleId}
       aria-describedby={description ? descriptionId : undefined}
       onClose={(event) => {
+        // A `close` event is queued by close() and fires later. If the dialog
+        // was opened again in between (React StrictMode runs an effect's
+        // cleanup and setup back to back on a dialog that mounts already open),
+        // the event is stale: the dialog is open, so nothing has closed.
+        if (event.currentTarget.open) return;
         announceModalClosed(event.currentTarget); // idempotent; frees the toast viewport
         if (openRef.current) onClose();
       }}

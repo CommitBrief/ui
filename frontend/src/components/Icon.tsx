@@ -31,6 +31,13 @@ const paths = {
   statusFailed: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "m9 9 6 6", "m15 9-6 6"],
   statusCancelled: ["M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z", "m5.6 5.6 12.8 12.8"],
   statusAttention: ["M12 3 22 20H2z", "M12 10v4", "M12 17v.01"],
+  plus: ["M12 5v14", "M5 12h14"],
+  folder: ["M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+  trash: ["M3 6h18", "M8 6V4h8v2", "M6 6l1 14h10l1-14", "M10 11v6", "M14 11v6"],
+  pencil: ["M4 20h4L19 9l-4-4L4 16z", "m13.5 6.5 4 4"],
+  upload: ["M12 16V4", "m7 9 5-5 5 5", "M5 20h14"],
+  download: ["M12 4v12", "m7 11 5 5 5-5", "M5 20h14"],
+  copy: ["M9 9h11v11H9z", "M5 15H4V4h11v1"],
   emptyBox: ["M3 7l9-4 9 4v10l-9 4-9-4z", "m3 7 9 4 9-4", "M12 11v10"],
 } as const;
 

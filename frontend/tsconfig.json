@@ -22,5 +22,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedIndexedAccess": true
   },
-  "include": ["src", "bindings", "vite.config.ts"]
+  "include": ["src", "bindings", "vite.config.ts", "vitest.config.ts"]
 }

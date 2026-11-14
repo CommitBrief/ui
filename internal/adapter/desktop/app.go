@@ -137,6 +137,7 @@ func Run(opts Options) error {
 	app.RegisterService(application.NewService(NewJobsService(state.Jobs, logger)))
 	app.RegisterService(application.NewService(NewSchedulesService(state.Schedules, logger)))
 	app.RegisterService(application.NewService(NewUpdatesService(state.Updates, logger)))
+	app.RegisterService(application.NewService(NewDialogsService(s.pickFolder(app), s.saveFile(app), state.Repos, logger)))
 
 	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:   mainWindowName,
