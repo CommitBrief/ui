@@ -1,16 +1,21 @@
 name: Release
 
 # Builds, signs and publishes CommitBrief UI for macOS, Windows and Linux when a
-# version tag (v*.*.*) is pushed (UI-0007, UI-0009). Signing is not optional:
+# version tag (v*.*.*) is pushed (UI-0007, UI-0009). macOS and Linux signing is
+# not optional; Windows is published unsigned (UI-0009, section Update
+# 2026-11-14, phase 14b):
 #
-#   * a tag run FAILS, before anything is published, when any operating-system
+#   * a tag run FAILS, before anything is published, when a macOS or Linux
 #     signing secret is missing (a release is signed from the first one,
 #     UI-0009 section 1);
+#   * the Windows build has no signing step and needs no secret; its packages
+#     are always published as they are (SmartScreen shows an "unknown
+#     publisher" warning, docs/RELEASING.md);
 #   * a manual run (workflow_dispatch) is a dry run: it builds and packages what
-#     it can, never signs (whatever secrets exist), says loudly (::warning:: and
-#     an "-UNSIGNED" artifact name) that it did not, and never publishes. Code
-#     from an arbitrary branch is therefore never signed with the real
-#     certificates.
+#     it can, never signs the macOS and Linux packages (whatever secrets exist),
+#     says loudly (::warning:: and an "-UNSIGNED" artifact name) that it did
+#     not, and never publishes. Code from an arbitrary branch is therefore never
+#     signed with the real certificates.
 #
 # The signing secrets belong to the GitHub environment "release" (Settings >
 # Environments), whose deployment rule allows version tags (v*) only; repository
@@ -26,8 +31,7 @@ name: Release
 #   macOS    APPLE_DEVELOPER_ID_P12 (base64 of the Developer ID Application .p12),
 #            APPLE_DEVELOPER_ID_PASSWORD, APPLE_NOTARY_KEY_ID, APPLE_NOTARY_ISSUER,
 #            APPLE_NOTARY_KEY (the App Store Connect API key, the .p8 text)
-#   Windows  WINDOWS_SIGNING_PFX (base64 of the Authenticode .pfx),
-#            WINDOWS_SIGNING_PASSWORD; optional WINDOWS_SIGNING_TIMESTAMP_URL
+#   Windows  none (unsigned)
 #   Linux    LINUX_PGP_KEY (ASCII-armored private key), LINUX_PGP_PASSPHRASE
 # docs/RELEASING.md describes how to create and rotate them.
 #
@@ -313,12 +317,8 @@ jobs:
     needs: meta
     runs-on: windows-latest
     timeout-minutes: 60
-    environment: ${{ github.event_name == 'push' && 'release' || '' }}
-    outputs:
-      signed: ${{ steps.preflight.outputs.signed }}
     env:
       VERSION: ${{ needs.meta.outputs.version }}
-      PUBLISH: ${{ needs.meta.outputs.publish }}
       APP_VERSION: ${{ needs.meta.outputs.version }}
     defaults:
       run:
@@ -339,37 +339,9 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Check the signing secrets
-        id: preflight
-        env:
-          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
-          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
-        run: |
-          set -euo pipefail
-          # A dry run (manual dispatch) never signs, even when secrets exist.
-          if [ "$PUBLISH" != true ]; then
-            echo "::warning::UNSIGNED dry-run build: Windows signing is skipped on a manual run. The artifact is named -UNSIGNED and cannot be published."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          missing=""
-          for name in WINDOWS_SIGNING_PFX WINDOWS_SIGNING_PASSWORD; do
-            [ -n "${!name:-}" ] || missing="$missing $name"
-          done
-          if [ -n "$missing" ]; then
-            if [ "$PUBLISH" = true ]; then
-              echo "::error::Windows signing secrets missing:$missing. A release is Authenticode-signed from the first one (UI-0009); nothing was published."
-              exit 1
-            fi
-            echo "::warning::UNSIGNED dry-run build: Windows signing secrets missing:$missing. The artifact is named -UNSIGNED and cannot be published."
-            echo "signed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "signed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      # NSIS builds the installer that is then Authenticode-signed, so it is
-      # pinned to an exact version (docs/RELEASING.md, "Pinned inputs"); bump
-      # these deliberately. Chocolatey verifies each package's own checksums.
+      # NSIS builds the installer, so it is pinned to an exact version
+      # (docs/RELEASING.md, "Pinned inputs"); bump these deliberately.
+      # Chocolatey verifies each package's own checksums.
       - name: Install make and NSIS (pinned)
         shell: pwsh
         run: |
@@ -399,29 +371,6 @@ jobs:
           ARCH=amd64 wails3 task windows:build
           ls -l bin
 
-      - name: Sign the executable
-        if: steps.preflight.outputs.signed == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_PFX: ${{ secrets.WINDOWS_SIGNING_PFX }}
-          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
-          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $pfx = Join-Path $env:RUNNER_TEMP 'authenticode.pfx'
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_SIGNING_PFX))
-          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -match '\\x64\\' } | Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $signtool) { throw 'signtool.exe was not found on the runner' }
-          $timestamp = if ($env:WINDOWS_SIGNING_TIMESTAMP_URL) { $env:WINDOWS_SIGNING_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-          & $signtool.FullName sign /f $pfx /p $env:WINDOWS_SIGNING_PASSWORD /fd sha256 /tr $timestamp /td sha256 /d 'CommitBrief UI' bin\commitbrief-ui.exe
-          if ($LASTEXITCODE -ne 0) { throw 'signtool failed on the executable' }
-          $status = (Get-AuthenticodeSignature bin\commitbrief-ui.exe).Status
-          Write-Host "Authenticode status of the executable: $status"
-          if ($status -ne 'Valid') { throw "the executable's signature is $status, not Valid" }
-          "SIGNTOOL=$($signtool.FullName)" | Add-Content -Path $env:GITHUB_ENV
-          "PFX_PATH=$pfx" | Add-Content -Path $env:GITHUB_ENV
-
       - name: Build the per-user installer
         working-directory: build/windows/nsis
         run: |
@@ -436,23 +385,6 @@ jobs:
             project.nsi
           ls -l ../../../bin
 
-      - name: Sign the installer
-        if: steps.preflight.outputs.signed == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_SIGNING_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PASSWORD }}
-          WINDOWS_SIGNING_TIMESTAMP_URL: ${{ secrets.WINDOWS_SIGNING_TIMESTAMP_URL }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $timestamp = if ($env:WINDOWS_SIGNING_TIMESTAMP_URL) { $env:WINDOWS_SIGNING_TIMESTAMP_URL } else { 'http://timestamp.digicert.com' }
-          $installer = 'bin\commitbrief-ui-amd64-installer.exe'
-          & $env:SIGNTOOL sign /f $env:PFX_PATH /p $env:WINDOWS_SIGNING_PASSWORD /fd sha256 /tr $timestamp /td sha256 /d 'CommitBrief UI installer' $installer
-          if ($LASTEXITCODE -ne 0) { throw 'signtool failed on the installer' }
-          $status = (Get-AuthenticodeSignature $installer).Status
-          Write-Host "Authenticode status of the installer: $status"
-          if ($status -ne 'Valid') { throw "the installer's signature is $status, not Valid" }
-          Remove-Item -Force $env:PFX_PATH
-
       - name: Package the update archive and the installer
         shell: pwsh
         run: |
@@ -460,20 +392,14 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $base = "commitbrief-ui_$($env:VERSION)_windows_amd64"
           # The update archive: a zip with exactly one top-level entry, the
-          # signed executable (what the in-app updater unpacks).
+          # (unsigned) executable (what the in-app updater unpacks).
           Compress-Archive -Path bin\commitbrief-ui.exe -DestinationPath "dist\$base.zip"
           Copy-Item bin\commitbrief-ui-amd64-installer.exe "dist\$base-setup.exe"
           Get-ChildItem dist
 
-      - name: Remove the certificate file
-        if: always()
-        shell: pwsh
-        run: |
-          if ($env:PFX_PATH -and (Test-Path $env:PFX_PATH)) { Remove-Item -Force $env:PFX_PATH }
-
       - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
         with:
-          name: dist-windows${{ steps.preflight.outputs.signed == 'true' && '' || '-UNSIGNED' }}
+          name: dist-windows
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -668,15 +594,16 @@ jobs:
       VERSION: ${{ needs.meta.outputs.version }}
       PRERELEASE: ${{ needs.meta.outputs.prerelease }}
     steps:
-      - name: Every platform must have been signed
+      # Windows is published unsigned on purpose (UI-0009, phase 14b), so it is
+      # not part of this gate.
+      - name: macOS and Linux must have been signed
         shell: bash
         env:
           MACOS: ${{ needs.macos.outputs.signed }}
-          WINDOWS: ${{ needs.windows.outputs.signed }}
           LINUX: ${{ needs.linux.outputs.signed }}
         run: |
           set -euo pipefail
-          for platform in MACOS WINDOWS LINUX; do
+          for platform in MACOS LINUX; do
             if [ "${!platform}" != true ]; then
               echo "::error::the $platform build was not signed; refusing to publish"
               exit 1
@@ -694,6 +621,15 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/release-notes.sh "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          # Windows is published unsigned (UI-0009 §Update 2026-11-14); every release says so.
+          cat >> "$RUNNER_TEMP/release-notes.md" <<'NOTE'
+
+          ---
+
+          **Windows:** the Windows packages are not code-signed. On first run SmartScreen
+          shows an "unknown publisher" warning; choose **More info → Run anyway**. Verify
+          the download against `checksums.txt` first.
+          NOTE
 
       - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
         with:
