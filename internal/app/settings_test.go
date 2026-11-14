@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -62,6 +63,10 @@ type fakeEngine struct {
 
 	sets   []setCall
 	setErr error
+	// writeInFlight/maxWriteInFlight measure how many config-changing calls
+	// (SetConfig, UseProvider, Upgrade) overlap; writeDelay widens the window.
+	writeInFlight, maxWriteInFlight int32
+	writeDelay                      time.Duration
 
 	providers    []port.ProviderInfo
 	providersErr error
@@ -132,7 +137,21 @@ func (f *fakeEngine) ConfigGet(ctx context.Context, key string) (string, error) 
 	return f.config[key], nil
 }
 
+// enterWrite marks the start of a config-changing call and returns what ends it.
+func (f *fakeEngine) enterWrite() func() {
+	n := atomic.AddInt32(&f.writeInFlight, 1)
+	for {
+		m := atomic.LoadInt32(&f.maxWriteInFlight)
+		if n <= m || atomic.CompareAndSwapInt32(&f.maxWriteInFlight, m, n) {
+			break
+		}
+	}
+	time.Sleep(f.writeDelay)
+	return func() { atomic.AddInt32(&f.writeInFlight, -1) }
+}
+
 func (f *fakeEngine) SetConfig(_ context.Context, key, value string, scope port.Scope) error {
+	defer f.enterWrite()()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sets = append(f.sets, setCall{key, value, scope})
@@ -144,6 +163,7 @@ func (f *fakeEngine) Providers(context.Context) ([]port.ProviderInfo, error) {
 }
 
 func (f *fakeEngine) UseProvider(_ context.Context, name string, scope port.Scope) error {
+	defer f.enterWrite()()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.used = append(f.used, useCall{name, scope})
@@ -162,6 +182,7 @@ func (f *fakeEngine) CheckUpgrade(context.Context) (port.UpgradeReport, error) {
 }
 
 func (f *fakeEngine) Upgrade(context.Context) error {
+	defer f.enterWrite()()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.upgrades++
@@ -254,23 +275,36 @@ func (e fakeEnv) LookupEnv(k string) (string, bool) {
 }
 func (e fakeEnv) HomeDir() (string, error) { return e.home, nil }
 
+// fakeOpener records what it was asked to open.
+type fakeOpener struct {
+	paths []string
+	err   error
+}
+
+func (f *fakeOpener) Open(_ context.Context, path string) error {
+	f.paths = append(f.paths, path)
+	return f.err
+}
+
 type settingsRig struct {
 	svc    *Settings
 	engine *fakeEngine
 	db     *memSettingsDB
 	repos  *memStore
 	gh     *fakeGitHub
+	opener *fakeOpener
 }
 
 func newSettingsRig(t *testing.T) *settingsRig {
 	t.Helper()
-	r := &settingsRig{engine: newFakeEngine(), db: newMemSettingsDB(), repos: newMemStore(), gh: &fakeGitHub{}}
+	r := &settingsRig{engine: newFakeEngine(), db: newMemSettingsDB(), repos: newMemStore(), gh: &fakeGitHub{}, opener: &fakeOpener{}}
 	r.svc = NewSettings(SettingsDeps{
 		Engine: r.engine,
 		Tx:     r.db,
 		Store:  r.db,
 		Repos:  r.repos,
 		GitHub: r.gh,
+		Opener: r.opener,
 		Env:    fakeEnv{vars: map[string]string{}, home: filepath.Join(settingsRoot, "home")},
 	})
 	return r
@@ -727,6 +761,144 @@ func TestSettingsFiles(t *testing.T) {
 
 	_, err = r.svc.Files(ctx, ConfigScope{RepoID: 4242})
 	wantSettingsCode(t, err, settings.CodeScopeInvalid, "repoId")
+}
+
+func TestSettingsOpenConfigFileOpensOnlyThePathItDerives(t *testing.T) {
+	ctx := context.Background()
+	r := newSettingsRig(t)
+	home := filepath.Join(settingsRoot, "home")
+	repoRow, _ := r.repos.Create(ctx, repo.Repository{Owner: "o", Name: "n", LocalPath: settingsRepoPath, Enabled: true})
+
+	if err := r.svc.OpenConfigFile(ctx, ConfigScope{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.svc.OpenConfigFile(ctx, ConfigScope{RepoID: repoRow.ID}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(home, ".commitbrief", "config.yml"),
+		filepath.Join(settingsRepoPath, ".commitbrief", "config.yml"),
+	}
+	if !reflect.DeepEqual(r.opener.paths, want) {
+		t.Errorf("opened %q, want %q", r.opener.paths, want)
+	}
+
+	// COMMITBRIEF_CONFIG moves the user file, and only that decides the path.
+	envPath := filepath.Join(settingsRoot, "elsewhere", "cb.yml")
+	r.svc.d.Env = fakeEnv{vars: map[string]string{"COMMITBRIEF_CONFIG": envPath}, home: home}
+	r.opener.paths = nil
+	if err := r.svc.OpenConfigFile(ctx, ConfigScope{}); err != nil || !reflect.DeepEqual(r.opener.paths, []string{envPath}) {
+		t.Errorf("opened %q (%v), want the COMMITBRIEF_CONFIG path", r.opener.paths, err)
+	}
+}
+
+func TestSettingsOpenConfigFileErrors(t *testing.T) {
+	ctx := context.Background()
+
+	r := newSettingsRig(t)
+	r.opener.err = fmt.Errorf("wrapped: %w", port.ErrFileMissing)
+	wantSettingsCode(t, r.svc.OpenConfigFile(ctx, ConfigScope{}), settings.CodeConfigFileMissing, "")
+
+	r = newSettingsRig(t)
+	r.opener.err = errors.New("exit status 1")
+	wantSettingsCode(t, r.svc.OpenConfigFile(ctx, ConfigScope{}), settings.CodeOpenFailed, "")
+
+	// No home directory and no COMMITBRIEF_CONFIG: the path is unknown and nothing is opened.
+	r = newSettingsRig(t)
+	r.svc.d.Env = nil
+	wantSettingsCode(t, r.svc.OpenConfigFile(ctx, ConfigScope{}), settings.CodeConfigPathUnknown, "")
+	if len(r.opener.paths) != 0 {
+		t.Errorf("opened %q without a path", r.opener.paths)
+	}
+
+	// A repository that is gone is a scope error, not an open.
+	r = newSettingsRig(t)
+	wantSettingsCode(t, r.svc.OpenConfigFile(ctx, ConfigScope{RepoID: 4242}), settings.CodeScopeInvalid, "repoId")
+
+	// No opener wired: internal, never a nil dereference.
+	r = newSettingsRig(t)
+	r.svc.d.Opener = nil
+	wantSettingsCode(t, r.svc.OpenConfigFile(ctx, ConfigScope{}), settings.CodeInternal, "")
+
+	// A canceled call stays canceled.
+	r = newSettingsRig(t)
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	r.opener.err = errors.New("killed")
+	wantSettingsCode(t, r.svc.OpenConfigFile(canceled, ConfigScope{}), settings.CodeCanceled, "")
+}
+
+// The CLI reads a config file, changes it and renames a temp file over it with
+// no lock, so overlapping writes can silently drop one. Everything that changes
+// CLI configuration must reach the engine one at a time.
+func TestSettingsConfigWritesReachTheEngineOneAtATime(t *testing.T) {
+	ctx := context.Background()
+	r := newSettingsRig(t)
+	r.engine.writeDelay = 5 * time.Millisecond
+	r.engine.report = port.UpgradeReport{Current: "1.22.0", Latest: "1.23.0", Method: upgradeMethodManual, UpdateAvailable: true}
+
+	const n = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			switch i % 3 {
+			case 0:
+				errs <- r.svc.SetConfig(ctx, "output.lang", "tr", ConfigScope{})
+			case 1:
+				errs <- r.svc.UseProvider(ctx, "openai", ConfigScope{})
+			default:
+				_, err := r.svc.UpgradeCLI(ctx)
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("a write failed: %v", err)
+		}
+	}
+	if got := atomic.LoadInt32(&r.engine.maxWriteInFlight); got != 1 {
+		t.Errorf("%d config writes overlapped in the engine, want them one at a time", got)
+	}
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	if len(r.engine.sets) != n/3 || len(r.engine.used) != n/3 || r.engine.upgrades != n/3 {
+		t.Errorf("sets=%d used=%d upgrades=%d, want %d each: no write may be lost", len(r.engine.sets), len(r.engine.used), r.engine.upgrades, n/3)
+	}
+}
+
+func TestSettingsAWriteWaitingForItsTurnLeavesWhenCanceled(t *testing.T) {
+	r := newSettingsRig(t)
+	r.engine.writeDelay = 150 * time.Millisecond
+
+	first := make(chan error, 1)
+	go func() { first <- r.svc.SetConfig(context.Background(), "output.lang", "tr", ConfigScope{}) }()
+	// Let the first write take its turn.
+	deadline := time.Now().Add(2 * time.Second)
+	for atomic.LoadInt32(&r.engine.writeInFlight) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the first write never reached the engine")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := r.svc.SetConfig(ctx, "output.color", "never", ConfigScope{})
+	wantSettingsCode(t, err, settings.CodeCanceled, "")
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	r.engine.mu.Lock()
+	defer r.engine.mu.Unlock()
+	if len(r.engine.sets) != 1 || r.engine.sets[0].key != "output.lang" {
+		t.Errorf("sets = %+v, want only the first write: the canceled one must not reach the engine", r.engine.sets)
+	}
 }
 
 // ----- providers -----

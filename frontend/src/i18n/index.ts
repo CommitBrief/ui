@@ -20,12 +20,17 @@ export function isLocale(value: unknown): value is Locale {
   return value === "en" || value === "tr";
 }
 
+/** The webview's language when it is one we translate, else English. */
+export function systemLocale(): Locale {
+  const preferred = typeof navigator === "undefined" ? "" : navigator.language.toLowerCase();
+  return preferred.startsWith("tr") ? "tr" : "en";
+}
+
 /** Stored choice first, then the webview language, then English. */
 export function detectLocale(): Locale {
   const stored = readStored(STORAGE_KEY);
   if (isLocale(stored)) return stored;
-  const preferred = typeof navigator === "undefined" ? "" : navigator.language.toLowerCase();
-  return preferred.startsWith("tr") ? "tr" : "en";
+  return systemLocale();
 }
 
 export function persistLocale(locale: Locale): void {

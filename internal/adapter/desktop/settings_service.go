@@ -70,6 +70,12 @@ func (s *SettingsService) ConfigFiles(ctx context.Context, scope app.ConfigScope
 	return out, s.fail("locate CLI config files", err)
 }
 
+// OpenConfigFile opens the config file of a scope with the system's default
+// application. The frontend names only the scope; the path is the service's.
+func (s *SettingsService) OpenConfigFile(ctx context.Context, scope app.ConfigScope) error {
+	return s.fail("open CLI config file", s.settings.OpenConfigFile(ctx, scope))
+}
+
 // Providers lists the CLI's providers and which one is active.
 func (s *SettingsService) Providers(ctx context.Context) ([]app.ProviderView, error) {
 	out, err := s.settings.Providers(ctx)

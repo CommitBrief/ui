@@ -113,6 +113,7 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 		Repos:  store.Repos(),
 		GitHub: ghClient,
 		Env:    platform.OSEnv{},
+		Opener: clicmd.NewOpener(),
 	})
 	if err := settingsSvc.Load(ctx); err != nil {
 		// Not fatal: the CLI is then discovered automatically.

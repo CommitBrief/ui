@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 
 	"github.com/CommitBrief/ui/internal/domain/errcode"
+	"github.com/CommitBrief/ui/internal/domain/fspath"
 	"github.com/CommitBrief/ui/internal/domain/settings"
 	"github.com/CommitBrief/ui/internal/port"
 )
@@ -39,6 +40,9 @@ type SettingsDeps struct {
 	// (COMMITBRIEF_CONFIG, the home directory). nil means no environment: the
 	// user-level path is then unknown and reported empty.
 	Env port.ProcessEnv
+	// Opener opens the config file with the system's default application. nil
+	// disables OpenConfigFile (it then fails as internal).
+	Opener port.FileOpener
 }
 
 // Settings is the use-case service behind the Settings screen: the CLI's
@@ -54,11 +58,31 @@ type Settings struct {
 	// always matches what was last committed.
 	mu      sync.Mutex
 	cliPath atomic.Pointer[string]
+
+	// writeSem (capacity 1) puts every call that changes the CLI's config files
+	// (or the CLI itself) in a line. The CLI reads a file, changes it and
+	// renames a temp file over it without locking, so two overlapping writes
+	// can drop one of the changes without any error. Held only around the
+	// engine call; a waiting caller leaves when its context ends.
+	writeSem chan struct{}
+}
+
+// lockWrite waits for its turn to write CLI configuration. The returned
+// function gives the turn up.
+func (s *Settings) lockWrite(ctx context.Context) (func(), error) {
+	select {
+	case s.writeSem <- struct{}{}:
+		return func() { <-s.writeSem }, nil
+	case <-ctx.Done():
+		return nil, s.fail("", ctx.Err())
+	}
 }
 
 // NewSettings wires the service. It does no I/O; call Load once after the
 // store is open.
-func NewSettings(d SettingsDeps) *Settings { return &Settings{d: d} }
+func NewSettings(d SettingsDeps) *Settings {
+	return &Settings{d: d, writeSem: make(chan struct{}, 1)}
+}
 
 // Load reads the UI settings once so CLIPathOverride is right from the first
 // CLI call on. A failure leaves the override empty (the CLI is then discovered
@@ -251,6 +275,11 @@ func (s *Settings) SetConfig(ctx context.Context, key, value string, scope Confi
 	if err != nil {
 		return err
 	}
+	unlock, err := s.lockWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.d.Engine.SetConfig(ctx, key, clean, sc); err != nil {
 		if errcode.CodeOf(err) == errcode.Unknown {
 			// The CLI ran and said no: its own validation (an unrecognized
@@ -301,6 +330,37 @@ func (s *Settings) Files(ctx context.Context, scope ConfigScope) (ConfigFiles, e
 		out.RepoPath = filepath.Join(sc.RepoPath, ".commitbrief", "config.yml")
 	}
 	return out, nil
+}
+
+// OpenConfigFile opens the config file of a scope with the system's default
+// application, for the keys that hold a list and can only be edited in the
+// file. The path is the one Files derives: nothing the frontend sends is ever
+// a path, only the scope.
+func (s *Settings) OpenConfigFile(ctx context.Context, scope ConfigScope) error {
+	files, err := s.Files(ctx, scope)
+	if err != nil {
+		return err
+	}
+	path := files.UserPath
+	if scope.RepoID != 0 {
+		path = files.RepoPath
+	}
+	if path == "" || fspath.ValidateLocal(path) != nil {
+		return settings.New(settings.CodeConfigPathUnknown, "")
+	}
+	if s.d.Opener == nil {
+		return settings.Wrap(settings.CodeInternal, "", errors.New("no file opener wired"))
+	}
+	switch err := s.d.Opener.Open(ctx, path); {
+	case err == nil:
+		return nil
+	case errors.Is(err, port.ErrFileMissing):
+		return settings.Wrap(settings.CodeConfigFileMissing, "", err)
+	case ctx.Err() != nil:
+		return s.fail("", ctx.Err())
+	default:
+		return settings.Wrap(settings.CodeOpenFailed, "", err)
+	}
 }
 
 // ----- providers -----
@@ -364,6 +424,11 @@ func (s *Settings) UseProvider(ctx context.Context, name string, scope ConfigSco
 	if err != nil {
 		return err
 	}
+	unlock, err := s.lockWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	return s.fail("provider", s.d.Engine.UseProvider(ctx, name, sc))
 }
 
@@ -481,7 +546,13 @@ func (s *Settings) UpgradeCLI(ctx context.Context) (CLIStatus, error) {
 		if up.Delegated {
 			return CLIStatus{}, settings.New(settings.CodeUpgradeDelegated, "")
 		}
-		if err := s.d.Engine.Upgrade(ctx); err != nil {
+		unlock, err := s.lockWrite(ctx)
+		if err != nil {
+			return CLIStatus{}, err
+		}
+		err = s.d.Engine.Upgrade(ctx)
+		unlock()
+		if err != nil {
 			return CLIStatus{}, s.fail("", err)
 		}
 	}

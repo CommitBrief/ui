@@ -44,6 +44,14 @@ const (
 	// CodeUpgradeDelegated: the CLI was installed through a package manager,
 	// which has to run the upgrade; the UI shows the command instead.
 	CodeUpgradeDelegated Code = "settings_upgrade_delegated"
+	// CodeConfigPathUnknown: the config file's location could not be worked out
+	// (no home directory) or is not a usable local path.
+	CodeConfigPathUnknown Code = "settings_config_path_unknown"
+	// CodeConfigFileMissing: the config file does not exist yet (the CLI
+	// creates it on the first `config set`).
+	CodeConfigFileMissing Code = "settings_config_file_missing"
+	// CodeOpenFailed: the system could not open the config file.
+	CodeOpenFailed Code = "settings_open_failed"
 	// CodeCanceled: the call was canceled by the frontend.
 	CodeCanceled Code = "canceled"
 	// CodeInternal: anything unexpected; details are in the log only.

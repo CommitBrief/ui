@@ -78,6 +78,14 @@ export function ListConfig(): $CancellablePromise<app$0.ConfigEntry[] | null> {
 }
 
 /**
+ * OpenConfigFile opens the config file of a scope with the system's default
+ * application. The frontend names only the scope; the path is the service's.
+ */
+export function OpenConfigFile(scope: app$0.ConfigScope): $CancellablePromise<void> {
+    return $Call.ByID(427568149, scope);
+}
+
+/**
  * ProviderConfig reads the model and base URL of one provider.
  */
 export function ProviderConfig(name: string): $CancellablePromise<app$0.ProviderConfig> {
