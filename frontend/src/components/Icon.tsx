@@ -38,6 +38,8 @@ const paths = {
   upload: ["M12 16V4", "m7 9 5-5 5 5", "M5 20h14"],
   download: ["M12 4v12", "m7 11 5 5 5-5", "M5 20h14"],
   copy: ["M9 9h11v11H9z", "M5 15H4V4h11v1"],
+  arrowLeft: ["M19 12H5", "m11 18-6-6 6-6"],
+  stop: ["M6 6h12v12H6z"],
   emptyBox: ["M3 7l9-4 9 4v10l-9 4-9-4z", "m3 7 9 4 9-4", "M12 11v10"],
 } as const;
 
