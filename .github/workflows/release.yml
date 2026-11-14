@@ -18,7 +18,7 @@ name: Release
 #     signed with the real certificates.
 #
 # The signing secrets belong to the GitHub environment "release" (Settings >
-# Environments), whose deployment rule allows version tags (v*) only; repository
+# Environments), whose deployment rule allows version tags (v*.*.*) only; repository
 # level secrets would be readable by any workflow on any branch. Only tag runs
 # enter that environment (the jobs that use secrets name it conditionally).
 #

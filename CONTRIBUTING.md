@@ -63,19 +63,17 @@ Layer boundaries are enforced by `depguard` in `.golangci.yml`; `make lint` repo
 
 ## Running Tests
 
-These are the same commands that CI runs on Linux, macOS and Windows. Run both before opening a pull request.
+These are the same commands that CI runs on Linux, macOS and Windows: the `lint` job runs `make check-lint`, the `test` job runs `make check-test` and `make build`. Run all three before opening a pull request, or run `make check` (both checks in one command) and `make build`.
 
 ```bash
-make check
-```
-
-```bash
+make check-lint
+make check-test
 make build
 ```
 
-`make check` runs gofmt drift, the frontend build, `go vet`, `golangci-lint`, the layering self-test, Go tests, the license, SPDX header and i18n parity checks, frontend lint and typecheck, Wails bindings drift and the release tooling self-test. Every new Go file needs the SPDX header, and every user-visible string needs a key in both `frontend/src/i18n/en.json` and `frontend/src/i18n/tr.json`.
+`make check-lint` runs gofmt drift, the frontend build, `go vet`, `golangci-lint`, the layering self-test, the license, SPDX header and i18n parity checks, frontend lint and typecheck, Wails bindings drift and the release tooling self-test. `make check-test` runs the Go tests. Every new Go file needs the SPDX header, and every user-visible string needs a key in both `frontend/src/i18n/en.json` and `frontend/src/i18n/tr.json`.
 
-If `make check` reports bindings drift, regenerate and commit the bindings:
+If `make check-lint` reports bindings drift, regenerate and commit the bindings:
 
 ```bash
 wails3 generate bindings -clean=true -ts -i . ./cmd/... ./internal/...
@@ -115,4 +113,4 @@ fix(repos): reject relative paths when adding a repository
 
 ## Code of Conduct
 
-This project is governed by the [Code of Conduct](https://github.com/CommitBrief/.github/blob/HEAD/CODE_OF_CONDUCT.md). By participating, you agree to uphold it.
+This project is governed by the [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you agree to uphold it.

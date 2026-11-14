@@ -1,0 +1,57 @@
+name: Setup build environment
+description: Go, Node, the native build dependencies per OS and the pinned tools shared by the CI jobs.
+
+# Third-party actions are pinned to a commit SHA (the tag is in the comment).
+# This is the one place the CI jobs get Go, Node and golangci-lint from; bump
+# them deliberately. The checkout step stays in the workflow: a local action can
+# only be used after the repository has been checked out.
+
+inputs:
+  golangci-lint:
+    description: Install golangci-lint (needed by the lint job only).
+    required: false
+    default: 'false'
+  tools-target:
+    description: Makefile target that installs the pinned tools, `tools` (wails3 and go-licenses) or `tools-wails3` (wails3 only).
+    required: false
+    default: tools
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: '1.26'
+        cache: true
+
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: Install Linux build dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+    - name: Install make
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: choco install make -y --no-progress
+
+    - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+      if: inputs.golangci-lint == 'true'
+      with:
+        version: v2.15.0
+        install-only: true
+
+    - name: Install pinned tools
+      shell: bash
+      env:
+        TOOLS_TARGET: ${{ inputs.tools-target }}
+      run: |
+        make "$TOOLS_TARGET"
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"

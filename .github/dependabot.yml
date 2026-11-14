@@ -1,7 +1,11 @@
 version: 2
 updates:
+  # The second directory holds the local composite action that pins the setup
+  # actions; Dependabot does not look into it from "/".
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/setup"
     schedule:
       interval: "weekly"
     commit-message:

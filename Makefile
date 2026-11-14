@@ -17,15 +17,17 @@ GO_LICENSES_VERSION := v1.6.0
 
 FRONTEND_SRC := $(shell find frontend/src frontend/index.html frontend/vite.config.ts frontend/package.json frontend/package-lock.json frontend/bindings internal/adapter/desktop/csp.txt -type f 2>/dev/null)
 
-.PHONY: help tools wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean \
+.PHONY: help tools tools-wails3 wails3-check build dev test vet lint lint-selftest fmt fmt-check tidy clean \
 	license-check spdx-check i18n-check bindings-check release-check \
-	frontend-deps frontend-build frontend-check check
+	frontend-deps frontend-build frontend-check check check-lint check-test
 
 help: ## Show this help
-	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z0-9_-]+:.*## / {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-tools: ## Install the pinned wails3 CLI and go-licenses into GOBIN
+tools-wails3: ## Install only the pinned wails3 CLI into GOBIN (what build and bindings-check need)
 	$(GO) install github.com/wailsapp/wails/v3/cmd/wails3@$(WAILS3_VERSION)
+
+tools: tools-wails3 ## Install the pinned wails3 CLI and go-licenses into GOBIN
 	$(GO) install github.com/google/go-licenses@$(GO_LICENSES_VERSION)
 
 wails3-check:
@@ -123,7 +125,9 @@ frontend-check: frontend-deps ## Frontend lint + typecheck
 	cd frontend && npm run lint
 	cd frontend && npm run typecheck
 
-check: ## Run every guard CI runs
+# CI runs these two targets as its "lint" and "test" jobs; `check` is the local
+# one-command gate and runs both, so no gate can exist in one but not the other.
+check-lint: ## Static gates (CI "lint" job): gofmt, frontend build, vet, golangci-lint, layering self-test, license/SPDX/i18n, frontend lint, bindings drift, release tooling
 	@echo "==> gofmt drift"
 	@$(MAKE) -s fmt-check
 	@echo "==> frontend build"
@@ -134,8 +138,6 @@ check: ## Run every guard CI runs
 	@$(MAKE) -s lint
 	@echo "==> lint-selftest"
 	@$(MAKE) -s lint-selftest
-	@echo "==> go test"
-	@$(MAKE) -s test
 	@echo "==> license-check"
 	@$(MAKE) -s license-check
 	@echo "==> spdx-check"
@@ -148,4 +150,12 @@ check: ## Run every guard CI runs
 	@$(MAKE) -s bindings-check
 	@echo "==> release-check"
 	@$(MAKE) -s release-check
+
+check-test: ## Tests (CI "test" job): Go tests with default and production tags
+	@echo "==> go test"
+	@$(MAKE) -s test
+
+check: ## Run every guard CI runs (check-lint, then check-test)
+	@$(MAKE) -s check-lint
+	@$(MAKE) -s check-test
 	@echo "==> all checks passed"

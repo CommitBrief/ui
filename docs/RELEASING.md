@@ -53,11 +53,13 @@ is public again; they never fall back to "up to date" silently.
 
 ## What the maintainer provides (once)
 
-Create a GitHub **environment** named `release` (Settings, Environments) and, in
-its "Deployment branches and tags" rule, allow only the tag pattern `v*`. Store the
-secrets below as **environment secrets of `release`**, not as repository secrets:
-repository secrets can be read by any workflow on any branch, and the update
-private key is the one key that can push an update to every user. The workflow
+The GitHub **environment** `release` (Settings, Environments) exists; its
+"Deployment branches and tags" rule allows only the tag pattern `v*.*.*`, the same
+pattern that triggers the workflow. If it has to be recreated, restore that rule
+first. Store the secrets below as **environment secrets of `release`**, not as
+repository secrets:
+repository secrets can be read by any workflow on any branch, and the signing
+keys are what make a download look like it came from this project. The workflow
 jobs enter the `release` environment only on tag runs; a manual dry run runs
 outside it and has no secrets. The code uses only these names.
 

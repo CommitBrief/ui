@@ -1,0 +1,86 @@
+name: Bug report
+description: Report something that does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Follow the [security policy](https://github.com/CommitBrief/ui/security/policy) instead.
+  - type: checkboxes
+    id: existing-issues
+    attributes:
+      label: Existing issues
+      options:
+        - label: I have searched the existing issues and this bug has not been reported yet.
+          required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of the bug.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The minimal steps that reproduce the bug.
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: What happened instead.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: The version of CommitBrief UI where the bug occurs (shown on the Updates screen).
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Name and version of the operating system, and how the app was installed (installer, archive, AppImage, package).
+      placeholder: "macOS 15.1, Windows 11 23H2, Ubuntu 24.04"
+    validations:
+      required: true
+  - type: input
+    id: cli-version
+    attributes:
+      label: CommitBrief CLI version
+      description: The full output of `commitbrief --version`. Write "not installed" if the CLI is not involved.
+      placeholder: "commitbrief 1.21.2 (commit abc1234, built 2026-10-31T00:00:00Z)"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Other environment details
+      description: Anything else that may be relevant, for example the AI provider in use or whether the repository is a linked worktree.
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant log output. Remove any secrets before pasting.
+      render: text
+    validations:
+      required: false
