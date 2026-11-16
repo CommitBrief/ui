@@ -235,6 +235,22 @@ export interface ImportResult {
 }
 
 /**
+ * LastRunSummary is the newest run of the bot jobs, for the tray's one-line
+ * summary.
+ */
+export interface LastRunSummary {
+    "runId": number;
+    "jobId": number;
+
+    /**
+     * Status is the run's status ("queued", "running", "succeeded", ...).
+     */
+    "status": string;
+    "startedAt": string;
+    "finishedAt": string | null;
+}
+
+/**
  * LocalReviewInput asks for a review of the changes in a repository's checkout.
  */
 export interface LocalReviewInput {
@@ -350,6 +366,72 @@ export interface ScheduledJob {
 }
 
 /**
+ * SchedulerState is the one-word summary of the scheduler the tray and the status
+ * bar show.
+ */
+export enum SchedulerState {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * SchedulerRunning: not paused, and at least one enabled job that does not
+     * need attention has a time window open now.
+     */
+    SchedulerRunning = "running",
+
+    /**
+     * SchedulerPaused: the user paused the bot.
+     */
+    SchedulerPaused = "paused",
+
+    /**
+     * SchedulerOutsideWindow: not paused, but no schedulable job has a window
+     * open now (this includes having no schedulable job at all).
+     */
+    SchedulerOutsideWindow = "outside_window",
+};
+
+/**
+ * SchedulerStatus is the scheduler as the screen and the tray show it.
+ */
+export interface SchedulerStatus {
+    "paused": boolean;
+    "state": SchedulerState;
+
+    /**
+     * LastTick is when the scheduler last looked at the clock; null before its
+     * first look.
+     */
+    "lastTick": string | null;
+
+    /**
+     * NextTick is when the next look is due; null when the scheduler is paused
+     * or not running.
+     */
+    "nextTick": string | null;
+
+    /**
+     * Version grows with every pause or resume. Of two statuses the one with the
+     * higher version is newer: a read that was slow must not replace a newer pause
+     * or resume. Omitted when zero (the pause never changed in this process).
+     */
+    "version"?: number;
+
+    /**
+     * AttentionCount is how many jobs stopped for the user's attention and wait
+     * for a resume.
+     */
+    "attentionCount"?: number;
+
+    /**
+     * LastRun is the newest run of a bot job; absent when there is none.
+     */
+    "lastRun"?: LastRunSummary | null;
+}
+
+/**
  * TaskLogEvent is the payload of EventTaskLog. The line is already masked.
  */
 export interface TaskLogEvent {
@@ -381,6 +463,46 @@ export interface TaskStatusEvent {
     "taskId": number;
     "status": run$0.Status;
     "errorCode": errcode$0.Code;
+}
+
+/**
+ * TrackedPRView is one pull request a bot job follows, with what that job
+ * reviewed last. The same pull request appears once per job that watches its
+ * repository. Closed and merged pull requests are not listed.
+ */
+export interface TrackedPRView {
+    "repositoryId": number;
+
+    /**
+     * Repository is "owner/name".
+     */
+    "repository": string;
+    "number": number;
+    "jobId": number;
+    "jobName": string;
+
+    /**
+     * Mode is the job's mode; the reviewed head is per mode.
+     */
+    "mode": job$0.Mode;
+    "jobEnabled": boolean;
+
+    /**
+     * State is the pull request's state; always "open" here.
+     */
+    "state": string;
+    "firstSeenAt": string;
+
+    /**
+     * LastHeadOID is the head commit of the job's last successful review in this
+     * mode; empty when it has not reviewed the pull request yet.
+     */
+    "lastHeadOid": string;
+
+    /**
+     * LastRunAt is when that review ran; null with an empty LastHeadOID.
+     */
+    "lastRunAt": string | null;
 }
 
 /**

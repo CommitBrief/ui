@@ -7,9 +7,19 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/wailsapp/wails/v3/pkg/application"
+
 	"github.com/CommitBrief/ui/internal/app"
 	"github.com/CommitBrief/ui/internal/domain/run"
 )
+
+// The event emitted when the scheduler is paused or resumed. The name is a
+// literal because the binding generator only finds RegisterEvent calls with
+// constant arguments; TestSchedulerEventNameMatchesTheApplication pins it to the
+// app constant.
+func init() {
+	application.RegisterEvent[app.SchedulerStatus]("scheduler:status")
+}
 
 // SchedulesService is the Wails-bound face of the scheduled-bot use cases: the
 // review-requested bot jobs with their time windows, resuming a job that needs
@@ -82,6 +92,35 @@ func (s *SchedulesService) AutostartEnabled(ctx context.Context) (bool, error) {
 // SetAutostart turns the login item on or off. It is off until the user asks.
 func (s *SchedulesService) SetAutostart(ctx context.Context, enabled bool) error {
 	return s.fail("write autostart", s.schedules.SetAutostart(ctx, enabled))
+}
+
+// SchedulerStatus returns whether the scheduler is paused (and, in one word,
+// whether it is running or outside every window) with its last and next look.
+func (s *SchedulesService) SchedulerStatus(ctx context.Context) (app.SchedulerStatus, error) {
+	out, err := s.schedules.SchedulerStatus(ctx)
+	return out, s.fail("scheduler status", err)
+}
+
+// PauseScheduler stops the scheduler from starting runs until it is resumed. The
+// pause is kept across restarts; a run in progress and "run now" are not
+// affected. It emits the scheduler:status event.
+func (s *SchedulesService) PauseScheduler(ctx context.Context) (app.SchedulerStatus, error) {
+	out, err := s.schedules.SetSchedulerPaused(ctx, true)
+	return out, s.fail("pause scheduler", err)
+}
+
+// ResumeScheduler lets the scheduler start runs again. It emits the
+// scheduler:status event.
+func (s *SchedulesService) ResumeScheduler(ctx context.Context) (app.SchedulerStatus, error) {
+	out, err := s.schedules.SetSchedulerPaused(ctx, false)
+	return out, s.fail("resume scheduler", err)
+}
+
+// TrackedPRs lists the open pull requests the bot jobs follow, with the head and
+// time of each job's last review.
+func (s *SchedulesService) TrackedPRs(ctx context.Context) ([]app.TrackedPRView, error) {
+	out, err := s.schedules.TrackedPRs(ctx)
+	return out, s.fail("list tracked pull requests", err)
 }
 
 // fail hands the frontend a copy of the classified error with no cause.

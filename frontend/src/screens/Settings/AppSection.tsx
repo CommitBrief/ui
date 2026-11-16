@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { autostartEnabled, describeScheduleError, setAutostart, toScheduleError } from "../../api/schedules";
 import { describeSettingsError, getUi, toSettingsError, updateUi, type UI } from "../../api/settings";
 import { themeModes, useTheme, type ThemeMode } from "../../app/theme";
-import { Button, Input, Select, useToast } from "../../components";
+import { Button, Input, Select, Switch, useToast } from "../../components";
 import { useI18n } from "../../i18n";
 import {
   errorField,
@@ -159,7 +160,94 @@ export function AppSection({ onCliPathChanged }: { onCliPathChanged: () => void 
   return (
     <Section anchor="settings-app" title={t("settings.app.title")} description={t("settings.app.description")}>
       {body}
+      <AutostartSwitch />
     </Section>
+  );
+}
+
+type AutostartState = { kind: "loading" } | { kind: "ready"; on: boolean } | { kind: "unsupported" } | { kind: "failed"; message: string };
+
+/**
+ * "Start at login": a login item that opens the app in the tray so schedules run
+ * without the user opening it. It takes effect at once (not with the form's Save)
+ * and is off until the user turns it on (UI-0002). Where the system has no login
+ * item the switch says so and stays off.
+ */
+function AutostartSwitch() {
+  const { t } = useI18n();
+  const toast = useToast();
+  const [state, setState] = useState<AutostartState>({ kind: "loading" });
+  const [busy, setBusy] = useState(false);
+  const alive = useRef(true);
+
+  const read = () => {
+    autostartEnabled().then(
+      (on) => {
+        if (alive.current) setState({ kind: "ready", on });
+      },
+      (error: unknown) => {
+        if (!alive.current) return;
+        const failure = toScheduleError(error);
+        setState(failure.code === "autostart_unsupported" ? { kind: "unsupported" } : { kind: "failed", message: describeScheduleError(failure, t) });
+      },
+    );
+  };
+
+  useEffect(() => {
+    alive.current = true;
+    read();
+    return () => {
+      alive.current = false;
+    };
+    // Mount only: a language change needs no new read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const change = async (next: boolean) => {
+    setBusy(true);
+    try {
+      await setAutostart(next);
+      if (alive.current) setState({ kind: "ready", on: next });
+    } catch (error) {
+      if (alive.current) toast({ kind: "error", title: t("settings.app.autostart.failed"), description: describeScheduleError(toScheduleError(error), t) });
+    } finally {
+      if (alive.current) setBusy(false);
+    }
+  };
+
+  if (state.kind === "failed") {
+    const retry = () => {
+      setState({ kind: "loading" });
+      read();
+    };
+    return (
+      <div className={styles.autostart}>
+        <Notice
+          tone="error"
+          title={t("settings.app.autostart.readFailed")}
+          live="alert"
+          action={
+            <Button size="sm" onClick={retry}>
+              {t("schedules.retry")}
+            </Button>
+          }
+        >
+          {state.message}
+        </Notice>
+      </div>
+    );
+  }
+
+  return (
+    <div className={styles.autostart}>
+      <Switch
+        label={t("settings.app.autostart")}
+        description={state.kind === "unsupported" ? t("settings.app.autostart.unsupported") : t("settings.app.autostart.description")}
+        checked={state.kind === "ready" && state.on}
+        disabled={state.kind !== "ready" || busy}
+        onChange={(event) => void change(event.target.checked)}
+      />
+    </div>
   );
 }
 

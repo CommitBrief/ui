@@ -45,11 +45,15 @@ const (
 	trayQuitLabel = "Quit"
 )
 
-// newTray creates the system tray icon with a Show / Quit menu. The icon is the
+// newTray creates the system tray icon with a Show / bot status / pause-resume /
+// Quit menu (the bot items only when bot is not nil). The icon is the
 // CommitBrief mark: a chevron template image on macOS, a light and a dark chevron
 // variant on Windows, and a single full-mark icon on Linux.
-func (s *shell) newTray(app *application.App) *application.SystemTray {
-	tray := app.SystemTray.New()
+//
+// The returned stop function ends the menu's refresh timer; call it when the
+// application has quit.
+func (s *shell) newTray(app *application.App, bot BotControl) (tray *application.SystemTray, stop func()) {
+	tray = app.SystemTray.New()
 	tray.SetTooltip(appName)
 
 	switch runtime.GOOS {
@@ -70,15 +74,17 @@ func (s *shell) newTray(app *application.App) *application.SystemTray {
 	}
 
 	menu := app.NewMenu()
-	menu.Add(trayShowLabel).OnClick(func(*application.Context) {
-		s.showMainWindow()
-	})
-	menu.AddSeparator()
-	menu.Add(trayQuitLabel).OnClick(func(*application.Context) {
-		s.quitting.Store(true)
-		app.Quit()
-	})
+	stop = buildTrayMenu(wailsMenu{menu}, trayActions{
+		show: s.showMainWindow,
+		quit: func() {
+			s.quitting.Store(true)
+			app.Quit()
+		},
+		// The click handler runs on the main thread; the pause writes to the
+		// database, so it does not run there.
+		async: func(f func()) { go f() },
+	}, bot, s.log)
 	tray.SetMenu(menu)
 
-	return tray
+	return tray, stop
 }

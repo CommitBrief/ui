@@ -52,10 +52,27 @@ export function ListBotJobs(): $CancellablePromise<app$0.ScheduledJob[] | null> 
 }
 
 /**
+ * PauseScheduler stops the scheduler from starting runs until it is resumed. The
+ * pause is kept across restarts; a run in progress and "run now" are not
+ * affected. It emits the scheduler:status event.
+ */
+export function PauseScheduler(): $CancellablePromise<app$0.SchedulerStatus> {
+    return $Call.ByID(2237175059);
+}
+
+/**
  * ResumeBotJob lets the scheduler run a job that stopped for attention again.
  */
 export function ResumeBotJob(id: number): $CancellablePromise<app$0.ScheduledJob> {
     return $Call.ByID(2706059031, id);
+}
+
+/**
+ * ResumeScheduler lets the scheduler start runs again. It emits the
+ * scheduler:status event.
+ */
+export function ResumeScheduler(): $CancellablePromise<app$0.SchedulerStatus> {
+    return $Call.ByID(30426292);
 }
 
 /**
@@ -74,6 +91,14 @@ export function SaveBotJob($in: app$0.BotJobInput): $CancellablePromise<app$0.Sc
 }
 
 /**
+ * SchedulerStatus returns whether the scheduler is paused (and, in one word,
+ * whether it is running or outside every window) with its last and next look.
+ */
+export function SchedulerStatus(): $CancellablePromise<app$0.SchedulerStatus> {
+    return $Call.ByID(3630220283);
+}
+
+/**
  * SetAutostart turns the login item on or off. It is off until the user asks.
  */
 export function SetAutostart(enabled: boolean): $CancellablePromise<void> {
@@ -85,4 +110,12 @@ export function SetAutostart(enabled: boolean): $CancellablePromise<void> {
  */
 export function SetBotJobEnabled(id: number, enabled: boolean): $CancellablePromise<app$0.ScheduledJob> {
     return $Call.ByID(24576129, id, enabled);
+}
+
+/**
+ * TrackedPRs lists the open pull requests the bot jobs follow, with the head and
+ * time of each job's last review.
+ */
+export function TrackedPRs(): $CancellablePromise<app$0.TrackedPRView[] | null> {
+    return $Call.ByID(1550938253);
 }

@@ -32,6 +32,10 @@ const (
 	// KeyLastTick is the settings row that remembers when the scheduler last
 	// looked, across restarts (the catch-up after the application was closed).
 	KeyLastTick = "scheduler.last_tick"
+	// KeyPaused is the settings row that remembers the user's pause across
+	// restarts: "true" while paused, absent otherwise. The pause is the user's
+	// decision, not a session state, so a launch honours it.
+	KeyPaused = "scheduler.paused"
 )
 
 // jobAttentionCodes are the failure classes that stop a scheduled job until the
@@ -93,9 +97,40 @@ type Scheduler struct {
 	lastFailure map[int64]errcode.Code // job ID -> failure class already notified
 	budgetDay   string                 // local day the budget notice was sent for
 
+	// ctl serializes Pause and Resume: the store write and the in-memory pause
+	// move together, so two callers (the tray and the screen) cannot leave the
+	// memory saying paused while the store says not.
+	ctl sync.Mutex
+
 	loop   sync.Mutex // guards cancel and done
 	cancel context.CancelFunc
 	done   chan struct{}
+
+	// st guards the pause and the status. It is separate from mu because a tick
+	// can hold mu for minutes (planning a run) and the tray must still answer.
+	st           sync.Mutex
+	version      uint64 // counts the changes of the pause; the newer status wins
+	paused       bool
+	pausedLoaded bool      // the pause was read from the store (or written to it)
+	lastLook     time.Time // when the last tick finished; zero before the first
+	running      bool      // Start was called and Stop was not
+}
+
+// SchedulerSnapshot is what the scheduler can say about itself without doing
+// I/O.
+type SchedulerSnapshot struct {
+	// Paused is the user's pause: ticks start nothing until Resume.
+	Paused bool
+	// LastTick is when the scheduler last looked at the clock in this process;
+	// nil before the first look.
+	LastTick *time.Time
+	// NextTick is when the next look is due; nil when the loop is not running
+	// or is paused.
+	NextTick *time.Time
+	// Version grows with every change of the pause. A reader that holds two
+	// snapshots keeps the one with the higher version, so a slow read that
+	// finishes late cannot undo a newer pause or resume.
+	Version uint64
 }
 
 // NewScheduler wires the scheduler. It does no I/O; call Start.
@@ -122,9 +157,15 @@ func (s *Scheduler) Start(ctx context.Context) {
 	if s.cancel != nil {
 		return
 	}
+	// The pause is read before the first look, so a launch while paused starts
+	// nothing.
+	s.loadPaused(ctx)
 	loopCtx, cancel := context.WithCancel(ctx)
 	s.cancel = cancel
 	s.done = make(chan struct{})
+	s.st.Lock()
+	s.running = true
+	s.st.Unlock()
 	go func(done chan struct{}) {
 		defer close(done)
 		s.Tick(loopCtx)
@@ -151,6 +192,9 @@ func (s *Scheduler) Stop() {
 	if cancel == nil {
 		return
 	}
+	s.st.Lock()
+	s.running = false
+	s.st.Unlock()
 	cancel()
 	<-done
 }
@@ -167,10 +211,19 @@ func (s *Scheduler) Tick(ctx context.Context) {
 	last := s.lastTick(ctx, now)
 
 	s.settleRuns(ctx, now)
-	s.startDue(ctx, last, now)
+	// A paused look still happens: runs that ended are settled and the time moves
+	// on, so Resume does not replay (or catch up on) what the pause skipped.
+	if s.loadPaused(ctx) {
+		s.d.Logger.Debug("scheduler: paused, starting nothing")
+	} else {
+		s.startDue(ctx, last, now)
+	}
 
 	if ctx.Err() == nil {
 		s.last = now
+		s.st.Lock()
+		s.lastLook = now
+		s.st.Unlock()
 		if err := s.d.Settings.Set(ctx, KeyLastTick, now.UTC().Format(time.RFC3339Nano)); err != nil {
 			s.d.Logger.Warn("scheduler: remembering the last look failed", "error", err)
 		}
@@ -224,6 +277,9 @@ func (s *Scheduler) startDue(ctx context.Context, last, now time.Time) {
 	for _, rec := range jobs {
 		if ctx.Err() != nil {
 			return
+		}
+		if s.Paused() {
+			return // paused while this look was running
 		}
 		if !rec.Enabled || len(rec.Windows) == 0 || rec.AttentionCode != "" {
 			continue
@@ -409,4 +465,84 @@ func (s *Scheduler) notify(ctx context.Context, n port.Notification) {
 	if s.d.Notifier != nil {
 		s.d.Notifier.Notify(ctx, n)
 	}
+}
+
+// Pause stops the scheduler from starting runs until Resume. The pause is stored
+// first, so it survives a restart; if storing fails nothing changes and the
+// error is returned. A run that is already going is not interrupted, and a run
+// the user starts by hand is not affected.
+func (s *Scheduler) Pause(ctx context.Context) error {
+	s.ctl.Lock()
+	defer s.ctl.Unlock()
+	if err := s.d.Settings.Set(ctx, KeyPaused, "true"); err != nil {
+		return err
+	}
+	s.setPaused(true)
+	return nil
+}
+
+// Resume lets the scheduler start runs again. Slots that came due during the
+// pause are dropped, not replayed.
+func (s *Scheduler) Resume(ctx context.Context) error {
+	s.ctl.Lock()
+	defer s.ctl.Unlock()
+	if err := s.d.Settings.Delete(ctx, KeyPaused); err != nil {
+		return err
+	}
+	s.setPaused(false)
+	return nil
+}
+
+// Paused reports the user's pause as the scheduler knows it now.
+func (s *Scheduler) Paused() bool {
+	s.st.Lock()
+	defer s.st.Unlock()
+	return s.paused
+}
+
+// Status is the scheduler's own state: the pause, the last look and the next
+// one.
+func (s *Scheduler) Status() SchedulerSnapshot {
+	s.st.Lock()
+	defer s.st.Unlock()
+	out := SchedulerSnapshot{Paused: s.paused, Version: s.version}
+	if !s.lastLook.IsZero() {
+		t := s.lastLook
+		out.LastTick = &t
+		if s.running && !s.paused {
+			next := t.Add(s.d.Tick)
+			out.NextTick = &next
+		}
+	}
+	return out
+}
+
+func (s *Scheduler) setPaused(v bool) {
+	s.st.Lock()
+	s.paused, s.pausedLoaded = v, true
+	s.version++
+	s.st.Unlock()
+}
+
+// loadPaused returns whether starting is held back. The pause is read from the
+// store once; when that fails the scheduler holds back (a pause the user chose
+// must not be lost to a read error) and reads again at the next look.
+func (s *Scheduler) loadPaused(ctx context.Context) bool {
+	s.st.Lock()
+	loaded, paused := s.pausedLoaded, s.paused
+	s.st.Unlock()
+	if loaded {
+		return paused
+	}
+	v, ok, err := s.d.Settings.Get(ctx, KeyPaused)
+	if err != nil {
+		s.d.Logger.Warn("scheduler: reading the pause failed; holding back until it can be read", "error", err)
+		return true
+	}
+	s.st.Lock()
+	defer s.st.Unlock()
+	if !s.pausedLoaded { // a Pause or Resume may have settled it meanwhile
+		s.paused, s.pausedLoaded = ok && v == "true", true
+	}
+	return s.paused
 }

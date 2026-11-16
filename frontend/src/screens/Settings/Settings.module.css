@@ -360,6 +360,11 @@
   font-weight: var(--weight-medium);
 }
 
+.autostart {
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
 .saveBar {
   display: flex;
   flex-wrap: wrap;

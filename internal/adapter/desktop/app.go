@@ -156,7 +156,12 @@ func Run(opts Options) error {
 	})
 	s.window.Store(window)
 
-	s.newTray(app)
+	var bot BotControl // stays a nil interface when there are no schedules
+	if state.Schedules != nil {
+		bot = state.Schedules
+	}
+	_, stopTray := s.newTray(app, bot)
+	defer stopTray()
 
 	return app.Run()
 }

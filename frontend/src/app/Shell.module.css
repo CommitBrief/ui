@@ -4,10 +4,19 @@
   background: var(--color-bg);
 }
 
-.main {
+/* Everything right of the sidebar: the screen scrolls, the status bar stays. */
+.column {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   height: 100%;
+}
+
+.main {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
   overflow-y: auto;
 }
 

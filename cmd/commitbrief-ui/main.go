@@ -172,6 +172,11 @@ func openState(ctx context.Context, dirs platform.Dirs, logger *slog.Logger) (de
 			AutoStart: autostart.New(autostart.Config{}),
 			Clock:     clock,
 			Logger:    logger,
+			Scheduler: scheduler,
+			Events:    desktop.NewEventEmitter(),
+			Repos:     store.Repos(),
+			Tracked:   store.Tracked(),
+			Runs:      store.Runs(),
 		}),
 		Close: func() error {
 			// Stop scheduling first, then the running reviews (their CLI

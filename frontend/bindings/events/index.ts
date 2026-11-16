@@ -14,6 +14,11 @@ import "../github.com/wailsapp/wails/v3/internal/eventcreate.js";
 export const RunStatus = "run:status";
 
 /**
+ * Name of the custom event "scheduler:status".
+ */
+export const SchedulerStatus = "scheduler:status";
+
+/**
  * Name of the custom event "task:log".
  */
 export const TaskLog = "task:log";

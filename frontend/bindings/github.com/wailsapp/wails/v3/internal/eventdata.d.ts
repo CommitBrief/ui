@@ -16,6 +16,7 @@ declare module "@wailsio/runtime" {
     namespace Events {
         interface CustomEvents {
             "run:status": app$0.RunStatusEvent;
+            "scheduler:status": app$0.SchedulerStatus;
             "task:log": app$0.TaskLogEvent;
             "task:status": app$0.TaskStatusEvent;
             "updates:status": update$0.Status;

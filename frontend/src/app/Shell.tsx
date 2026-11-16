@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { EmptyState, PageHeader, Sidebar, type SidebarItem } from "../components";
 import { useI18n } from "../i18n";
 import { Preferences } from "./Preferences";
+import { StatusBar } from "./StatusBar";
 import { usePath } from "./router";
 import { resolveRoute, routes } from "./routes";
 import styles from "./Shell.module.css";
@@ -56,18 +57,21 @@ export function Shell() {
         activePath={route?.path ?? null}
         footer={<Preferences />}
       />
-      <main id="main" ref={mainRef} className={styles.main} tabIndex={-1}>
-        <div className={styles.content}>
-          {route ? (
-            route.element
-          ) : (
-            <>
-              <PageHeader title={t("route.notFound.title")} />
-              <EmptyState title={t("route.notFound.message")} />
-            </>
-          )}
-        </div>
-      </main>
+      <div className={styles.column}>
+        <main id="main" ref={mainRef} className={styles.main} tabIndex={-1}>
+          <div className={styles.content}>
+            {route ? (
+              route.element
+            ) : (
+              <>
+                <PageHeader title={t("route.notFound.title")} />
+                <EmptyState title={t("route.notFound.message")} />
+              </>
+            )}
+          </div>
+        </main>
+        <StatusBar />
+      </div>
     </div>
   );
 }

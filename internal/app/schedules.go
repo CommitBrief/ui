@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/CommitBrief/ui/internal/domain/errcode"
@@ -33,6 +34,19 @@ type SchedulesDeps struct {
 	AutoStart port.AutoStart
 	Clock     port.Clock
 	Logger    *slog.Logger
+	// Scheduler is the loop the pause and the status belong to; nil means the
+	// pause is unavailable (the calls fail as internal).
+	Scheduler SchedulerControl
+	// Events receives EventSchedulerStatus when the pause changes; nil means
+	// nothing is sent.
+	Events port.EventEmitter
+	// Repos and Tracked back the tracked pull request list; nil means it is
+	// empty.
+	Repos   port.RepoStore
+	Tracked port.TrackedPRStore
+	// Runs backs the "last run" line of the scheduler status; nil means the
+	// status carries none.
+	Runs port.RunStore
 }
 
 // Schedules is the use-case service behind the bot screen: it saves the bot jobs
@@ -42,6 +56,10 @@ type SchedulesDeps struct {
 // Every error it returns is a *run.Error.
 type Schedules struct {
 	d SchedulesDeps
+
+	setMu     sync.Mutex // orders SetSchedulerPaused calls and their announcements
+	obsMu     sync.Mutex
+	observers []func(SchedulerStatus)
 }
 
 // NewSchedules wires the service.
